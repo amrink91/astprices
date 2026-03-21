@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir alembic asyncpg sqlalchemy[asyncio] psycopg2-binary pgvector
+RUN pip install --no-cache-dir alembic asyncpg sqlalchemy[asyncio] psycopg2-binary pgvector pydantic-settings
 
 COPY . .
 

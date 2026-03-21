@@ -231,6 +231,48 @@ def upgrade() -> None:
         ON current_prices (is_promoted) WHERE is_promoted = true
     """)
 
+    # ── Seed: stores ─────────────────────────────────────────
+    op.execute("""
+        INSERT INTO stores (id, slug, display_name, website_url,
+            delivery_cost_tenge, delivery_free_threshold, min_order_tenge,
+            avg_delivery_minutes, is_active, scrape_health_score,
+            scraper_config, created_at, updated_at)
+        VALUES
+            (uuid_generate_v4(), 'magnum',  'Magnum',   'https://magnum.kz',
+             790,  5000, 1500, 45, true, 1.0, '{"type":"api","city_id":2}',        NOW(), NOW()),
+            (uuid_generate_v4(), 'arbuz',   'Arbuz.kz', 'https://arbuz.kz',
+             590,  4000, 2000, 60, true, 1.0, '{"type":"graphql","city_id":2}',    NOW(), NOW()),
+            (uuid_generate_v4(), 'small',   'Small',    'https://small.kz',
+             700,  5500, 1000, 30, true, 1.0, '{"type":"playwright"}',             NOW(), NOW()),
+            (uuid_generate_v4(), 'galmart', 'Galmart',  'https://galmart.kz',
+             650,  4500, 1500, 50, true, 1.0, '{"type":"playwright","bitrix":true}', NOW(), NOW()),
+            (uuid_generate_v4(), 'astore',  'A-Store',  'https://a-store.kz',
+             800,  6000,  500, 40, true, 1.0, '{"type":"api"}',                    NOW(), NOW()),
+            (uuid_generate_v4(), 'anvar',   'Анвар',    'https://www.anvar.kz',
+             690,  5000, 1000, 35, true, 1.0, '{"type":"playwright","catalog":"/catalog/"}', NOW(), NOW())
+        ON CONFLICT (slug) DO NOTHING
+    """)
+
+    # ── Seed: categories ─────────────────────────────────────
+    op.execute("""
+        INSERT INTO categories (id, name, slug, icon_emoji, sort_order, created_at, updated_at)
+        VALUES
+            (uuid_generate_v4(), 'Молочные продукты',   'dairy',      '🥛', 1,  NOW(), NOW()),
+            (uuid_generate_v4(), 'Мясо и птица',        'meat',       '🥩', 2,  NOW(), NOW()),
+            (uuid_generate_v4(), 'Рыба и морепродукты', 'fish',       '🐟', 3,  NOW(), NOW()),
+            (uuid_generate_v4(), 'Бакалея',             'grocery',    '🌾', 4,  NOW(), NOW()),
+            (uuid_generate_v4(), 'Овощи и фрукты',      'vegetables', '🥦', 5,  NOW(), NOW()),
+            (uuid_generate_v4(), 'Напитки',             'drinks',     '🥤', 6,  NOW(), NOW()),
+            (uuid_generate_v4(), 'Заморозка',           'frozen',     '🧊', 7,  NOW(), NOW()),
+            (uuid_generate_v4(), 'Снеки и сладкое',     'snacks',     '🍫', 8,  NOW(), NOW()),
+            (uuid_generate_v4(), 'Хлеб и выпечка',      'bakery',     '🍞', 9,  NOW(), NOW()),
+            (uuid_generate_v4(), 'Масла и соусы',       'oils',       '🫙', 10, NOW(), NOW()),
+            (uuid_generate_v4(), 'Бытовая химия',       'household',  '🧹', 11, NOW(), NOW()),
+            (uuid_generate_v4(), 'Детские товары',      'baby',       '👶', 12, NOW(), NOW()),
+            (uuid_generate_v4(), 'Другое',              'other',      '📦', 99, NOW(), NOW())
+        ON CONFLICT (slug) DO NOTHING
+    """)
+
 
 def downgrade() -> None:
     op.execute("DROP MATERIALIZED VIEW IF EXISTS current_prices")
