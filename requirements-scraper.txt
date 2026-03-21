@@ -7,3 +7,4 @@ asyncpg==0.29.0
 pgvector==0.3.2
 parsel==1.9.1
 redis==5.1.0
+pytz==2024.1
