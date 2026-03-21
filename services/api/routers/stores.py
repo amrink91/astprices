@@ -21,7 +21,7 @@ class StoreOut(BaseModel):
     slug: str
     display_name: str
     logo_url: Optional[str] = None
-    base_url: str
+    website_url: Optional[str] = None
     delivery_cost_tenge: float
     delivery_free_threshold: float
     min_order_tenge: float
@@ -41,7 +41,7 @@ async def list_stores(session: AsyncSession = Depends(get_db)):
     """
     rows = (await session.execute(text("""
         SELECT
-            s.id, s.slug, s.display_name, s.logo_url, s.base_url,
+            s.id, s.slug, s.display_name, s.logo_url, s.website_url,
             s.delivery_cost_tenge, s.delivery_free_threshold,
             s.min_order_tenge, s.avg_delivery_minutes,
             s.scrape_health_score, s.is_active,
