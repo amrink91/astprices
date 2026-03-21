@@ -197,7 +197,7 @@ services:
     build:
       context: .
       dockerfile: services/scheduler/Dockerfile
-    command: celery -A celery_app worker --loglevel=info --queues=scrape --concurrency=3
+    command: celery -A services.scheduler.celery_app worker --loglevel=info --queues=scrape --concurrency=3
     depends_on:
       - redis
       - postgres
@@ -211,7 +211,7 @@ services:
     build:
       context: .
       dockerfile: services/scheduler/Dockerfile
-    command: celery -A celery_app worker --loglevel=info --queues=normalize --concurrency=2
+    command: celery -A services.scheduler.celery_app worker --loglevel=info --queues=normalize --concurrency=2
     depends_on:
       - redis
       - postgres
@@ -225,7 +225,7 @@ services:
     build:
       context: .
       dockerfile: services/scheduler/Dockerfile
-    command: celery -A celery_app worker --loglevel=info --queues=publish --concurrency=2
+    command: celery -A services.scheduler.celery_app worker --loglevel=info --queues=publish --concurrency=2
     depends_on:
       - redis
       - postgres
@@ -239,7 +239,7 @@ services:
     build:
       context: .
       dockerfile: services/scheduler/Dockerfile
-    command: celery -A celery_app beat --loglevel=info
+    command: celery -A services.scheduler.celery_app beat --loglevel=info
     depends_on:
       - redis
       - postgres
@@ -253,7 +253,7 @@ services:
     build:
       context: .
       dockerfile: services/scheduler/Dockerfile
-    command: celery -A celery_app flower --port=5555 --basic_auth=${GRAFANA_ADMIN_USER}:${GRAFANA_ADMIN_PASSWORD}
+    command: celery -A services.scheduler.celery_app flower --port=5555 --basic_auth=${GRAFANA_ADMIN_USER}:${GRAFANA_ADMIN_PASSWORD}
     ports:
       - "127.0.0.1:5555:5555"
     depends_on:
