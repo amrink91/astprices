@@ -231,9 +231,9 @@ def upgrade() -> None:
         ON current_prices (is_promoted) WHERE is_promoted = true
     """)
 
-    # ── Seed: stores (raw SQL to handle JSONB properly) ─────
-    from sqlalchemy import text as sa_text
-    op.execute(sa_text("""
+    # ── Seed: stores (exec_driver_sql bypasses SA bind param parsing) ──
+    conn = op.get_bind()
+    conn.exec_driver_sql("""
         INSERT INTO stores (slug, display_name, website_url,
             delivery_cost_tenge, delivery_free_threshold, min_order_tenge,
             avg_delivery_minutes, is_active, scrape_health_score,
@@ -252,7 +252,7 @@ def upgrade() -> None:
             ('anvar',   'Анвар',    'https://www.anvar.kz',
              690,  5000, 1000, 35, true, 1.0, '{"type":"playwright","catalog":"/catalog/"}'::jsonb)
         ON CONFLICT (slug) DO NOTHING
-    """))
+    """)
 
     # ── Seed: categories ─────────────────────────────────────
     categories_table = sa.table(
