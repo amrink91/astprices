@@ -85,7 +85,6 @@ services:
     build:
       context: .
       dockerfile: services/db/Dockerfile
-    command: alembic upgrade head
     depends_on:
       postgres:
         condition: service_healthy

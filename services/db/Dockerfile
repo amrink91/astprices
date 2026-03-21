@@ -13,4 +13,5 @@ COPY . .
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-CMD ["alembic", "-c", "services/db/alembic.ini", "upgrade", "head"]
+WORKDIR /app/services/db
+CMD ["alembic", "upgrade", "head"]
