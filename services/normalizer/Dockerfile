@@ -13,4 +13,5 @@ COPY . .
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
-ENV C_FORCE_ROOT=1
+
+CMD ["python", "-m", "services.normalizer.run"]
