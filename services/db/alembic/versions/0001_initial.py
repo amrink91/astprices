@@ -231,46 +231,28 @@ def upgrade() -> None:
         ON current_prices (is_promoted) WHERE is_promoted = true
     """)
 
-    # ── Seed: stores ─────────────────────────────────────────
-    stores_table = sa.table(
-        "stores",
-        sa.column("slug", sa.String),
-        sa.column("display_name", sa.String),
-        sa.column("website_url", sa.String),
-        sa.column("delivery_cost_tenge", sa.Numeric),
-        sa.column("delivery_free_threshold", sa.Numeric),
-        sa.column("min_order_tenge", sa.Numeric),
-        sa.column("avg_delivery_minutes", sa.Integer),
-        sa.column("is_active", sa.Boolean),
-        sa.column("scrape_health_score", sa.Float),
-        sa.column("scraper_config", sa.String),
-    )
-    op.bulk_insert(stores_table, [
-        {"slug": "magnum",  "display_name": "Magnum",   "website_url": "https://magnum.kz",
-         "delivery_cost_tenge": 790,  "delivery_free_threshold": 5000, "min_order_tenge": 1500,
-         "avg_delivery_minutes": 45, "is_active": True, "scrape_health_score": 1.0,
-         "scraper_config": '{"type":"api","city_id":2}'},
-        {"slug": "arbuz",   "display_name": "Arbuz.kz", "website_url": "https://arbuz.kz",
-         "delivery_cost_tenge": 590,  "delivery_free_threshold": 4000, "min_order_tenge": 2000,
-         "avg_delivery_minutes": 60, "is_active": True, "scrape_health_score": 1.0,
-         "scraper_config": '{"type":"graphql","city_id":2}'},
-        {"slug": "small",   "display_name": "Small",    "website_url": "https://small.kz",
-         "delivery_cost_tenge": 700,  "delivery_free_threshold": 5500, "min_order_tenge": 1000,
-         "avg_delivery_minutes": 30, "is_active": True, "scrape_health_score": 1.0,
-         "scraper_config": '{"type":"playwright"}'},
-        {"slug": "galmart", "display_name": "Galmart",  "website_url": "https://galmart.kz",
-         "delivery_cost_tenge": 650,  "delivery_free_threshold": 4500, "min_order_tenge": 1500,
-         "avg_delivery_minutes": 50, "is_active": True, "scrape_health_score": 1.0,
-         "scraper_config": '{"type":"playwright","bitrix":true}'},
-        {"slug": "astore",  "display_name": "A-Store",  "website_url": "https://a-store.kz",
-         "delivery_cost_tenge": 800,  "delivery_free_threshold": 6000, "min_order_tenge": 500,
-         "avg_delivery_minutes": 40, "is_active": True, "scrape_health_score": 1.0,
-         "scraper_config": '{"type":"api"}'},
-        {"slug": "anvar",   "display_name": "Анвар",    "website_url": "https://www.anvar.kz",
-         "delivery_cost_tenge": 690,  "delivery_free_threshold": 5000, "min_order_tenge": 1000,
-         "avg_delivery_minutes": 35, "is_active": True, "scrape_health_score": 1.0,
-         "scraper_config": '{"type":"playwright","catalog":"/catalog/"}'},
-    ])
+    # ── Seed: stores (raw SQL to handle JSONB properly) ─────
+    from sqlalchemy import text as sa_text
+    op.execute(sa_text("""
+        INSERT INTO stores (slug, display_name, website_url,
+            delivery_cost_tenge, delivery_free_threshold, min_order_tenge,
+            avg_delivery_minutes, is_active, scrape_health_score,
+            scraper_config)
+        VALUES
+            ('magnum',  'Magnum',   'https://magnum.kz',
+             790,  5000, 1500, 45, true, 1.0, '{"type":"api","city_id":2}'::jsonb),
+            ('arbuz',   'Arbuz.kz', 'https://arbuz.kz',
+             590,  4000, 2000, 60, true, 1.0, '{"type":"graphql","city_id":2}'::jsonb),
+            ('small',   'Small',    'https://small.kz',
+             700,  5500, 1000, 30, true, 1.0, '{"type":"playwright"}'::jsonb),
+            ('galmart', 'Galmart',  'https://galmart.kz',
+             650,  4500, 1500, 50, true, 1.0, '{"type":"playwright","bitrix":true}'::jsonb),
+            ('astore',  'A-Store',  'https://a-store.kz',
+             800,  6000,  500, 40, true, 1.0, '{"type":"api"}'::jsonb),
+            ('anvar',   'Анвар',    'https://www.anvar.kz',
+             690,  5000, 1000, 35, true, 1.0, '{"type":"playwright","catalog":"/catalog/"}'::jsonb)
+        ON CONFLICT (slug) DO NOTHING
+    """))
 
     # ── Seed: categories ─────────────────────────────────────
     categories_table = sa.table(
