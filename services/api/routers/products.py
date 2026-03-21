@@ -166,7 +166,7 @@ async def get_product(
             p.id, p.canonical_name, p.brand, p.unit,
             p.unit_size::float, p.image_url,
             c.slug          AS category_slug,
-            c.name_ru       AS category_name,
+            c.name          AS category_name,
             COALESCE(c.icon_emoji, '') AS emoji,
             s.display_name  AS store_name,
             s.slug          AS store_slug,

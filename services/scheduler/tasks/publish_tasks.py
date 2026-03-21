@@ -406,9 +406,9 @@ async def _cart_tip() -> dict:
     # Получаем название категории
     async with get_session() as session:
         cat_name_row = (await session.execute(sa_text(
-            "SELECT name_ru FROM categories WHERE slug = ANY(:slugs) LIMIT 1"
+            "SELECT name FROM categories WHERE slug = ANY(:slugs) LIMIT 1"
         ), {"slugs": category_slugs})).first()
-    category_name = cat_name_row.name_ru if cat_name_row else "Продукты"
+    category_name = cat_name_row.name if cat_name_row else "Продукты"
 
     optimization_data = {
         "category_name": category_name,

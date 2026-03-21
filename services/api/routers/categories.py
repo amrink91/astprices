@@ -36,21 +36,21 @@ async def list_categories(session: AsyncSession = Depends(get_db)):
     """
     rows = (await session.execute(text("""
         SELECT
-            c.id, c.slug, c.name_ru, c.icon_emoji,
+            c.id, c.slug, c.name, c.icon_emoji,
             c.parent_id, c.sort_order,
             COUNT(DISTINCT cp.product_id) AS product_count
         FROM categories c
         LEFT JOIN products p       ON p.category_id = c.id
         LEFT JOIN current_prices cp ON cp.product_id = p.id AND cp.in_stock = true
         GROUP BY c.id
-        ORDER BY c.sort_order, c.name_ru
+        ORDER BY c.sort_order, c.name
     """))).fetchall()
 
     return [
         CategoryOut(
             id=r.id,
             slug=r.slug,
-            name=r.name_ru,
+            name=r.name,
             icon_emoji=r.icon_emoji,
             parent_id=r.parent_id,
             sort_order=r.sort_order,
