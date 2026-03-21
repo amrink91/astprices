@@ -1,0 +1,405 @@
+version: '3.9'
+
+# ================================================================
+# ASTANA PRICES — Docker Compose
+# Статический IP, без прокси | 2 Gemini аккаунта (бесплатный тир)
+# ================================================================
+
+x-python-base: &python-base
+  restart: unless-stopped
+  env_file: .env
+  networks:
+    - ap-net
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+x-scraper-base: &scraper-base
+  <<: *python-base
+  build:
+    context: .
+    dockerfile: services/scraper/Dockerfile
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  deploy:
+    resources:
+      limits:
+        memory: 1g
+        cpus: '0.5'
+
+services:
+
+  # ────────────────────────────────────────────────────────────
+  # INFRASTRUCTURE
+  # ────────────────────────────────────────────────────────────
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    <<: *python-base
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./services/db/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  redis:
+    image: redis:7-alpine
+    <<: *python-base
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  # ────────────────────────────────────────────────────────────
+  # МИГРАЦИИ (запускается один раз)
+  # ────────────────────────────────────────────────────────────
+
+  migrator:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/db/Dockerfile
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ────────────────────────────────────────────────────────────
+  # BACKEND API
+  # ────────────────────────────────────────────────────────────
+
+  api:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    command: uvicorn services.api.main:app --host 0.0.0.0 --port 8000 --workers 2
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ────────────────────────────────────────────────────────────
+  # SCRAPERS (изолированы, один инстанс на магазин)
+  # ────────────────────────────────────────────────────────────
+
+  scraper-magnum:
+    <<: *scraper-base
+    environment:
+      STORE_SLUG: magnum
+      SCRAPER_TYPE: api
+    container_name: ap-scraper-magnum
+
+  scraper-arbuz:
+    <<: *scraper-base
+    environment:
+      STORE_SLUG: arbuz
+      SCRAPER_TYPE: graphql
+    container_name: ap-scraper-arbuz
+
+  scraper-small:
+    <<: *scraper-base
+    environment:
+      STORE_SLUG: small
+      SCRAPER_TYPE: playwright
+    container_name: ap-scraper-small
+
+  scraper-galmart:
+    <<: *scraper-base
+    environment:
+      STORE_SLUG: galmart
+      SCRAPER_TYPE: playwright
+    container_name: ap-scraper-galmart
+
+  scraper-astore:
+    <<: *scraper-base
+    environment:
+      STORE_SLUG: astore
+      SCRAPER_TYPE: api
+    container_name: ap-scraper-astore
+
+  scraper-anvar:
+    <<: *scraper-base
+    environment:
+      STORE_SLUG: anvar
+      SCRAPER_TYPE: playwright
+    container_name: ap-scraper-anvar
+    deploy:
+      resources:
+        limits:
+          memory: 1.5g   # Playwright тяжелее
+          cpus: '0.75'
+
+  # ────────────────────────────────────────────────────────────
+  # GEMINI NORMALIZER
+  # ────────────────────────────────────────────────────────────
+
+  normalizer:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/normalizer/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ────────────────────────────────────────────────────────────
+  # CELERY WORKERS
+  # ────────────────────────────────────────────────────────────
+
+  celery-scraper:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    command: celery -A celery_app worker --loglevel=info --queues=scrape --concurrency=3
+    depends_on:
+      - redis
+      - postgres
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  celery-normalize:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    command: celery -A celery_app worker --loglevel=info --queues=normalize --concurrency=2
+    depends_on:
+      - redis
+      - postgres
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  celery-publish:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    command: celery -A celery_app worker --loglevel=info --queues=publish --concurrency=2
+    depends_on:
+      - redis
+      - postgres
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  celery-beat:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    command: celery -A celery_app beat --loglevel=info
+    depends_on:
+      - redis
+      - postgres
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  flower:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    command: celery -A celery_app flower --port=5555 --basic_auth=${GRAFANA_ADMIN_USER}:${GRAFANA_ADMIN_PASSWORD}
+    ports:
+      - "127.0.0.1:5555:5555"
+    depends_on:
+      - redis
+
+  # ────────────────────────────────────────────────────────────
+  # OPTIMIZER
+  # ────────────────────────────────────────────────────────────
+
+  optimizer:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/optimizer/Dockerfile
+    ports:
+      - "127.0.0.1:8001:8001"
+    depends_on:
+      - postgres
+      - redis
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ────────────────────────────────────────────────────────────
+  # TELEGRAM PUBLISHER
+  # ────────────────────────────────────────────────────────────
+
+  tg-publisher:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/tg-publisher/Dockerfile
+    depends_on:
+      - postgres
+      - redis
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ────────────────────────────────────────────────────────────
+  # CHECKOUT SERVICE
+  # ────────────────────────────────────────────────────────────
+
+  checkout:
+    <<: *python-base
+    build:
+      context: .
+      dockerfile: services/checkout/Dockerfile
+    ports:
+      - "127.0.0.1:8002:8002"
+    depends_on:
+      - postgres
+      - redis
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ────────────────────────────────────────────────────────────
+  # FRONTEND (Next.js)
+  # ────────────────────────────────────────────────────────────
+
+  frontend:
+    <<: *python-base
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - api
+
+  # ────────────────────────────────────────────────────────────
+  # NGINX + SSL
+  # ────────────────────────────────────────────────────────────
+
+  nginx:
+    image: nginx:alpine
+    <<: *python-base
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - certbot_www:/var/www/certbot:ro
+      - certbot_conf:/etc/letsencrypt:ro
+    depends_on:
+      - api
+      - frontend
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;"
+    restart: unless-stopped
+    networks:
+      - ap-net
+
+  # ────────────────────────────────────────────────────────────
+  # МОНИТОРИНГ
+  # ────────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:latest
+    <<: *python-base
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_DAYS}d'
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    <<: *python-base
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3001:3000"
+
+# ────────────────────────────────────────────────────────────
+# VOLUMES & NETWORKS
+# ────────────────────────────────────────────────────────────
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  certbot_www:
+  certbot_conf:
+
+networks:
+  ap-net:
+    driver: bridge

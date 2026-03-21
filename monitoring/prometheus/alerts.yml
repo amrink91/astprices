@@ -1,0 +1,44 @@
+groups:
+  - name: astana_prices
+    rules:
+
+      - alert: APIDown
+        expr: up{job="api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API недоступен"
+          description: "FastAPI не отвечает более 2 минут"
+
+      - alert: CeleryWorkerDown
+        expr: flower_workers_online == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Celery воркеры не запущены"
+
+      - alert: HighMemoryUsage
+        expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокое потребление памяти: {{ $labels.name }}"
+
+      - alert: PostgresConnectionsHigh
+        expr: pg_stat_activity_count > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Много соединений к PostgreSQL ({{ $value }})"
+
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis заполнен на {{ $value | humanizePercentage }}"

@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0f1423;
+  --card: #19203a;
+  --accent: #409cff;
+  --green: #2ed573;
+  --red: #ff4757;
+}
+
+body {
+  background: var(--bg);
+  color: #f0f0fa;
+  font-family: inherit;
+}
+
+/* Кастомный скроллбар */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: #2d3561;
+  border-radius: 3px;
+}
