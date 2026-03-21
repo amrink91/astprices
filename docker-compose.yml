@@ -1,5 +1,3 @@
-version: '3.9'
-
 # ================================================================
 # ASTANA PRICES — Docker Compose
 # Статический IP, без прокси | 2 Gemini аккаунта (бесплатный тир)
@@ -318,21 +316,7 @@ services:
           memory: 512m
 
   # ────────────────────────────────────────────────────────────
-  # FRONTEND (Next.js)
-  # ────────────────────────────────────────────────────────────
-
-  frontend:
-    <<: *python-base
-    build:
-      context: ./services/frontend
-      dockerfile: Dockerfile
-    ports:
-      - "127.0.0.1:3000:3000"
-    depends_on:
-      - api
-
-  # ────────────────────────────────────────────────────────────
-  # NGINX + SSL
+  # NGINX (HTTP only — SSL terminates on router 192.168.90.254)
   # ────────────────────────────────────────────────────────────
 
   nginx:
@@ -340,24 +324,10 @@ services:
     <<: *python-base
     ports:
       - "80:80"
-      - "443:443"
     volumes:
       - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - certbot_www:/var/www/certbot:ro
-      - certbot_conf:/etc/letsencrypt:ro
     depends_on:
       - api
-      - frontend
-
-  certbot:
-    image: certbot/certbot
-    volumes:
-      - certbot_www:/var/www/certbot
-      - certbot_conf:/etc/letsencrypt
-    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;"
-    restart: unless-stopped
-    networks:
-      - ap-net
 
   # ────────────────────────────────────────────────────────────
   # МОНИТОРИНГ
@@ -397,8 +367,6 @@ volumes:
   redis_data:
   prometheus_data:
   grafana_data:
-  certbot_www:
-  certbot_conf:
 
 networks:
   ap-net:
