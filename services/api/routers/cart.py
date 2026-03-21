@@ -1,5 +1,7 @@
 """
-Роутер умной корзины: оптимизация + генерация URL для магазинов.
+Роутер умной корзины: принимает список product_ids,
+возвращает оптимальную разбивку по магазинам (split-cart).
+Использует SplitCartOptimizer из services/optimizer/optimizer.py.
 """
 from __future__ import annotations
 
@@ -9,7 +11,8 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.api.deps import get_db, get_current_user_optional
@@ -19,17 +22,15 @@ router = APIRouter()
 logger = logging.getLogger("api.cart")
 
 
-# ── Схемы ──────────────────────────────────────────────────────
+# ── Request / Response schemas ────────────────────────────────
 
 class CartItemIn(BaseModel):
     product_id: UUID
-    quantity: float = 1.0
-    canonical_name: str
+    quantity: float = Field(default=1.0, gt=0, le=100)
 
 
-class CartRequest(BaseModel):
-    items: list[CartItemIn]
-    max_stores: int = 3
+class CartOptimizeRequest(BaseModel):
+    product_ids: list[UUID] = Field(..., min_length=1, max_length=50)
 
 
 class CartItemOut(BaseModel):
@@ -39,20 +40,21 @@ class CartItemOut(BaseModel):
     unit_price: float
     total_price: float
     store_slug: str
-    store_url: Optional[str]
+    store_url: Optional[str] = None
+    image_url: Optional[str] = None
 
 
 class StoreAssignmentOut(BaseModel):
+    store_id: UUID
     store_slug: str
     store_name: str
     items: list[CartItemOut]
     items_subtotal: float
     delivery_cost: float
     total: float
-    checkout_url: Optional[str]
 
 
-class CartResponse(BaseModel):
+class CartOptimizeResponse(BaseModel):
     assignments: list[StoreAssignmentOut]
     grand_total: float
     baseline_total: float
@@ -62,45 +64,51 @@ class CartResponse(BaseModel):
     not_found: list[str]
 
 
-# ── Endpoints ──────────────────────────────────────────────────
+# ── Endpoints ─────────────────────────────────────────────────
 
-@router.post("/optimize", response_model=CartResponse)
+@router.post("/optimize", response_model=CartOptimizeResponse)
 async def optimize_cart(
-    req: CartRequest,
+    req: CartOptimizeRequest,
     session: AsyncSession = Depends(get_db),
     user=Depends(get_current_user_optional),
 ):
     """
-    Оптимизация корзины: разбивка по магазинам для минимальной цены.
-    Авторизация не обязательна.
+    Оптимизация корзины: принимает список product_ids,
+    находит canonical_name каждого товара из БД и возвращает
+    оптимальное распределение покупок по магазинам.
     """
+    # Resolve product names from DB
+    rows = (await session.execute(text("""
+        SELECT id, canonical_name
+        FROM products
+        WHERE id = ANY(:ids)
+    """), {"ids": list(req.product_ids)})).fetchall()
+
+    found_map = {r.id: r.canonical_name for r in rows}
+    missing_ids = [str(pid) for pid in req.product_ids if pid not in found_map]
+
+    if not found_map:
+        raise HTTPException(status_code=400, detail="Ни один товар не найден в базе")
+
     cart_items = [
         CartItem(
-            product_id=i.product_id,
-            quantity=Decimal(str(i.quantity)),
-            canonical_name=i.canonical_name,
+            product_id=pid,
+            quantity=Decimal("1"),
+            canonical_name=name,
         )
-        for i in req.items
+        for pid, name in found_map.items()
     ]
 
     try:
-        opt = SplitCartOptimizer(session)
-        result = await opt.optimize(cart_items)
+        optimizer = SplitCartOptimizer(session)
+        result = await optimizer.optimize(cart_items)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Генерируем checkout URL для каждого магазина
-    from services.checkout.cart_url_builder import build_cart_url
-
     assignments_out = []
     for a in result.assignments:
-        checkout_items = [
-            {"store_sku": i.store_url or "", "store_url": i.store_url, "name": i.canonical_name, "quantity": int(i.quantity)}
-            for i in a.items
-        ]
-        checkout_url = build_cart_url(a.store_slug, checkout_items)
-
         assignments_out.append(StoreAssignmentOut(
+            store_id=a.store_id,
             store_slug=a.store_slug,
             store_name=a.store_name,
             items=[
@@ -112,43 +120,25 @@ async def optimize_cart(
                     total_price=float(i.total_price),
                     store_slug=i.store_slug,
                     store_url=i.store_url,
+                    image_url=i.image_url,
                 )
                 for i in a.items
             ],
             items_subtotal=float(a.items_subtotal),
             delivery_cost=float(a.delivery_cost),
             total=float(a.total),
-            checkout_url=checkout_url,
         ))
 
-    return CartResponse(
+    not_found = result.not_found_products
+    if missing_ids:
+        not_found.extend([f"id:{mid}" for mid in missing_ids])
+
+    return CartOptimizeResponse(
         assignments=assignments_out,
         grand_total=float(result.grand_total),
         baseline_total=float(result.baseline_single_store_total),
         savings=float(result.savings),
         savings_pct=result.savings_pct,
         strategy=result.strategy,
-        not_found=result.not_found_products,
+        not_found=not_found,
     )
-
-
-@router.post("/checkout-urls")
-async def checkout_urls(
-    assignments: list[StoreAssignmentOut],
-):
-    """
-    Сгенерировать прямые URL для добавления товаров в корзину каждого магазина.
-    """
-    from services.checkout.cart_url_builder import build_cart_url
-
-    result = {}
-    for a in assignments:
-        checkout_items = [
-            {"store_sku": item.store_url or "", "store_url": item.store_url,
-             "name": item.canonical_name, "quantity": int(item.quantity)}
-            for item in a.items
-        ]
-        url = build_cart_url(a.store_slug, checkout_items)
-        result[a.store_slug] = url
-
-    return result

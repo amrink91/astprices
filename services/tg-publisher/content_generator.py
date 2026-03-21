@@ -1,196 +1,326 @@
 """
-Генератор текстов для Telegram-постов через Gemini Pro.
-Строгие правила: нейтральный тон, никаких сравнений «лучший/худший магазин».
+Генератор контента для Telegram-постов через Gemini Pro.
+Все тексты на русском, нейтральный тон, без критики магазинов, только факты.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from decimal import Decimal
-from typing import Optional
+from typing import Any
 
 from shared.utils.gemini_client import get_gemini_client
 
 logger = logging.getLogger("content_generator")
 
-
-@dataclass
-class DealItem:
-    canonical_name: str
-    store_name: str
-    price_tenge: Decimal
-    old_price_tenge: Optional[Decimal]
-    discount_pct: Optional[float]
-    store_url: str
-    image_url: Optional[str]
-    category_emoji: str = "🛒"
+MAX_PHOTO_CAPTION = 1024   # Telegram limit for photo captions
+MAX_TEXT_MESSAGE = 4096    # Telegram limit for text messages
 
 
-@dataclass
-class CartTip:
-    stores: list[str]
-    total_savings: Decimal
-    items_count: int
-    store_items: dict[str, list[DealItem]]  # store_name → items
+def _truncate(text: str, limit: int = MAX_PHOTO_CAPTION) -> str:
+    """Обрезка текста до лимита, сохраняя целостность строк."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    trimmed = text[: limit - 3]
+    last_nl = trimmed.rfind("\n")
+    if last_nl > limit * 0.7:
+        trimmed = trimmed[:last_nl]
+    return trimmed + "..."
 
 
-class ContentGenerator:
-    """Формирует HTML-текст постов для Telegram."""
+# ─────────────────────────────────────────────────────────────────────
+# 1. Топ скидки дня
+# ─────────────────────────────────────────────────────────────────────
 
-    def __init__(self) -> None:
-        self.gemini = get_gemini_client()
+async def generate_daily_deals_post(deals: list[dict[str, Any]]) -> str:
+    """
+    Генерирует пост «Топ скидки дня» (caption для фото, <= 1024 символов).
 
-    # ─────────────────────────────────────────────────────────────
-    # Публичный API
-    # ─────────────────────────────────────────────────────────────
+    Каждый deal:
+        canonical_name, price_tenge, old_price_tenge, discount_pct,
+        store_name, store_url, store_image_url,
+        other_stores: [{store_name, price_tenge, store_url}]
+    """
+    if not deals:
+        return ""
 
-    async def daily_deals_caption(self, deals: list[DealItem]) -> str:
-        """Подпись к карточке дневных акций (≤1024 символов)."""
-        prompt = self._build_daily_prompt(deals)
-        try:
-            text = await self.gemini.generate_post_text(prompt)
-            return self._trim(text, 1024)
-        except Exception as e:
-            logger.warning(f"Gemini daily caption: {e}")
-            return self._fallback_daily(deals)
-
-    async def weekly_digest_text(self, deals: list[DealItem], week_label: str) -> str:
-        """Текст еженедельного дайджеста (≤4096)."""
-        prompt = self._build_weekly_prompt(deals, week_label)
-        try:
-            text = await self.gemini.generate_post_text(prompt)
-            return self._trim(text, 4096)
-        except Exception as e:
-            logger.warning(f"Gemini weekly: {e}")
-            return self._fallback_weekly(deals, week_label)
-
-    async def cart_tip_text(self, tip: CartTip) -> str:
-        """Текст совета по разделённой корзине (≤4096)."""
-        prompt = self._build_cart_prompt(tip)
-        try:
-            text = await self.gemini.generate_post_text(prompt)
-            return self._trim(text, 4096)
-        except Exception as e:
-            logger.warning(f"Gemini cart tip: {e}")
-            return self._fallback_cart(tip)
-
-    async def anomaly_text(self, anomalies: list[dict]) -> str:
-        """Текст поста об аномалиях цен (≤4096)."""
-        prompt = self._build_anomaly_prompt(anomalies)
-        try:
-            text = await self.gemini.generate_post_text(prompt)
-            return self._trim(text, 4096)
-        except Exception as e:
-            logger.warning(f"Gemini anomaly: {e}")
-            return self._fallback_anomaly(anomalies)
-
-    # ─────────────────────────────────────────────────────────────
-    # Промпты
-    # ─────────────────────────────────────────────────────────────
-
-    def _build_daily_prompt(self, deals: list[DealItem]) -> str:
-        items_text = "\n".join(
-            f"- {d.category_emoji} {d.canonical_name}: {d.price_tenge}₸"
-            + (f" (было {d.old_price_tenge}₸, скидка {d.discount_pct:.0f}%)" if d.old_price_tenge else "")
-            + f" в {d.store_name}"
-            for d in deals[:10]
+    # Формируем блок данных для каждого товара
+    items_block = ""
+    for i, d in enumerate(deals, 1):
+        store_url = d.get("store_url") or ""
+        store_link = (
+            f'<a href="{store_url}">{d["store_name"]}</a>'
+            if store_url else d["store_name"]
         )
-        return f"""Напиши короткий, живой пост для Telegram-канала о ценах на продукты в Астане.
-Tone: дружелюбный, информативный. Никаких оценок магазинов. Факты.
-Данные акций сегодня:
-{items_text}
-
-Формат HTML для Telegram: <b>жирный</b>, <i>курсив</i>, эмодзи ОК.
-Длина: 200-400 символов. Завершить: #астана_цены #акции"""
-
-    def _build_weekly_prompt(self, deals: list[DealItem], week_label: str) -> str:
-        top = sorted(deals, key=lambda d: d.discount_pct or 0, reverse=True)[:15]
-        items_text = "\n".join(
-            f"- {d.canonical_name}: {d.price_tenge}₸"
-            + (f" −{d.discount_pct:.0f}%" if d.discount_pct else "")
-            for d in top
+        items_block += (
+            f"{i}. <b>{d['canonical_name']}</b>\n"
+            f"   {int(d['old_price_tenge'])}₸ -> <b>{int(d['price_tenge'])}₸</b> "
+            f"(-{d['discount_pct']:.0f}%) | {store_link}\n"
         )
-        return f"""Напиши еженедельный дайджест акций на продукты в Астане за {week_label}.
-Стиль: журналистский, краткий, нейтральный. Никакой критики магазинов.
-Лучшие акции недели:
-{items_text}
+        # Другие магазины с ценами и ссылками
+        for s in d.get("other_stores", []):
+            s_url = s.get("store_url") or ""
+            s_link = (
+                f'<a href="{s_url}">{s["store_name"]}</a>'
+                if s_url else s["store_name"]
+            )
+            items_block += f"   {s_link} — {int(s['price_tenge'])}₸\n"
+        items_block += "\n"
 
-HTML Telegram формат. Длина 500-900 символов.
-В конце: #дайджест #астана_цены"""
+    # Генерируем заголовок через Gemini
+    prompt = (
+        "Напиши ОДИН короткий заголовок (макс 60 символов) для Telegram поста "
+        "о топ-5 скидках дня на продукты в Астане. "
+        "Один эмодзи в начале. Дружелюбный, информативный тон. "
+        "Верни ТОЛЬКО заголовок, одна строка, без кавычек."
+    )
 
-    def _build_cart_prompt(self, tip: CartTip) -> str:
-        breakdown = "\n".join(
-            f"• {store}: {len(items)} товаров"
-            for store, items in tip.store_items.items()
+    client = get_gemini_client()
+    try:
+        title = await client.generate_post_text(prompt)
+        title = title.strip().split("\n")[0][:80]
+    except Exception as e:
+        logger.warning(f"Gemini title fallback: {e}")
+        title = "🏷 Лучшие скидки дня в Астане"
+
+    caption = f"{title}\n\n{items_block}#астана_цены #акции"
+    return _truncate(caption, MAX_PHOTO_CAPTION)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2. Еженедельный дайджест
+# ─────────────────────────────────────────────────────────────────────
+
+async def generate_weekly_digest_post(stats: dict[str, Any]) -> str:
+    """
+    Генерирует еженедельный дайджест цен (caption для фото, <= 1024 символов).
+
+    stats:
+        period, total_products_tracked, avg_basket_change_pct,
+        top_drops: [{canonical_name, drop_pct, old_price, new_price, store_name, store_url}],
+        top_rises: [{canonical_name, rise_pct, old_price, new_price, store_name, store_url}],
+        cheapest_stores: [{store_name, products_cheapest}]
+    """
+    drops_text = _format_price_changes(stats.get("top_drops", []), "drop")
+    rises_text = _format_price_changes(stats.get("top_rises", []), "rise")
+    stores_text = _format_cheapest_stores(stats.get("cheapest_stores", []))
+
+    prompt = f"""Напиши информативный Telegram пост — еженедельный дайджест цен в Астане.
+
+Период: {stats.get('period', 'прошлая неделя')}
+Отслеживаем: {stats.get('total_products_tracked', 0)} товаров
+Средняя корзина: {stats.get('avg_basket_change_pct', 0):+.1f}%
+
+Снижения цен:
+{drops_text}
+
+Повышения цен:
+{rises_text}
+
+Магазины с самыми низкими ценами:
+{stores_text}
+
+ПРАВИЛА:
+- Русский, для жителей Астаны
+- Нейтральный тон, только факты, НЕ критикуй магазины
+- HTML разметка: <b>, <i>, <a href="">
+- Макс 850 символов
+- Один эмодзи в заголовке
+- В конце: #дайджест #астана_цены"""
+
+    client = get_gemini_client()
+    try:
+        text = await client.generate_post_text(prompt)
+    except Exception as e:
+        logger.warning(f"Gemini weekly digest fallback: {e}")
+        text = _fallback_weekly_digest(stats)
+
+    return _truncate(text, MAX_PHOTO_CAPTION)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 3. Умная корзина
+# ─────────────────────────────────────────────────────────────────────
+
+async def generate_cart_tip_post(optimization: dict[str, Any]) -> str:
+    """
+    Генерирует пост-рекомендацию по оптимизации корзины (caption для фото, <= 1024).
+
+    optimization:
+        category_name, strategy, grand_total, baseline_total, savings, savings_pct,
+        assignments: [{store_name, items: [{canonical_name, price, store_url}],
+                       subtotal, delivery_cost, total}]
+    """
+    assignments_text = ""
+    for a in optimization.get("assignments", []):
+        items_lines = "\n".join(
+            f"   - {it['canonical_name']} — {int(it['price'])}₸"
+            for it in a.get("items", [])[:5]
         )
-        return f"""Напиши практичный совет для Telegram: как выгодно разделить корзину продуктов.
-Экономия: {tip.total_savings}₸ на {tip.items_count} товарах.
-Разбивка по магазинам:
-{breakdown}
-
-Тон: полезный советник, не реклама. Нейтрально. HTML Telegram.
-Длина 300-600 символов. #умная_корзина #астана_экономия"""
-
-    def _build_anomaly_prompt(self, anomalies: list[dict]) -> str:
-        items_text = "\n".join(
-            f"- {a['name']}: {a['direction']} на {abs(a['deviation_pct']):.0f}% → {a['new_price']}₸"
-            for a in anomalies[:8]
+        remaining = len(a.get("items", [])) - 5
+        if remaining > 0:
+            items_lines += f"\n   +ещё {remaining} товаров"
+        assignments_text += (
+            f"\n{a['store_name']}: {int(a['total'])}₸ "
+            f"(товары {int(a['subtotal'])}₸ + доставка {int(a['delivery_cost'])}₸)\n"
+            f"{items_lines}\n"
         )
-        return f"""Напиши короткий нейтральный пост об изменениях цен в Астане.
-НЕ указывай в каком магазине. Только факт движения цены.
-Данные:
-{items_text}
 
-HTML Telegram. 150-350 символов. #мониторинг_цен"""
+    prompt = f"""Напиши короткий Telegram пост — совет по оптимизации корзины продуктов в Астане.
 
-    # ─────────────────────────────────────────────────────────────
-    # Fallback-тексты (без Gemini)
-    # ─────────────────────────────────────────────────────────────
+Категория: {optimization.get('category_name', 'Продукты')}
+Стратегия: {optimization.get('strategy', 'split')}
+Оптимальная сумма: {int(optimization.get('grand_total', 0))}₸
+В одном магазине было бы: {int(optimization.get('baseline_total', 0))}₸
+Экономия: {int(optimization.get('savings', 0))}₸ ({optimization.get('savings_pct', 0):.1f}%)
 
-    def _fallback_daily(self, deals: list[DealItem]) -> str:
-        lines = ["🛍 <b>Акции сегодня в Астане</b>\n"]
-        for d in deals[:8]:
-            line = f"{d.category_emoji} {d.canonical_name} — <b>{d.price_tenge}₸</b>"
-            if d.discount_pct:
-                line += f" <i>−{d.discount_pct:.0f}%</i>"
-            lines.append(line)
-        lines.append("\n#астана_цены #акции")
-        return "\n".join(lines)
+По магазинам:
+{assignments_text}
 
-    def _fallback_weekly(self, deals: list[DealItem], week_label: str) -> str:
-        lines = [f"📊 <b>Дайджест акций — {week_label}</b>\n"]
-        top = sorted(deals, key=lambda d: d.discount_pct or 0, reverse=True)[:12]
-        for d in top:
-            line = f"• {d.canonical_name} — {d.price_tenge}₸"
-            if d.discount_pct:
-                line += f" (−{d.discount_pct:.0f}%)"
-            lines.append(line)
-        lines.append("\n#дайджест #астана_цены")
-        return "\n".join(lines)
+ПРАВИЛА:
+- Русский, для жителей Астаны
+- Нейтральный информационный стиль, НЕ критикуй магазины
+- HTML: <b>, <i>
+- Макс 850 символов, акцент на экономии
+- Один эмодзи в заголовке
+- В конце: #умная_корзина #астана_экономия"""
 
-    def _fallback_cart(self, tip: CartTip) -> str:
-        lines = [f"🛒 <b>Выгодная корзина: экономия {tip.total_savings}₸</b>\n"]
-        for store, items in tip.store_items.items():
-            lines.append(f"<b>{store}</b>: {', '.join(i.canonical_name for i in items[:4])}")
-        lines.append(f"\nВсего товаров: {tip.items_count}")
-        lines.append("#умная_корзина #астана_экономия")
-        return "\n".join(lines)
+    client = get_gemini_client()
+    try:
+        text = await client.generate_post_text(prompt)
+    except Exception as e:
+        logger.warning(f"Gemini cart tip fallback: {e}")
+        text = _fallback_cart_tip(optimization)
 
-    def _fallback_anomaly(self, anomalies: list[dict]) -> str:
-        lines = ["📈 <b>Изменения цен</b>\n"]
-        for a in anomalies[:6]:
-            direction = "↑" if a["deviation_pct"] > 0 else "↓"
-            lines.append(f"{direction} {a['name']}: {a['new_price']}₸ ({a['deviation_pct']:+.0f}%)")
-        lines.append("\n#мониторинг_цен")
-        return "\n".join(lines)
+    return _truncate(text, MAX_PHOTO_CAPTION)
 
-    @staticmethod
-    def _trim(text: str, limit: int) -> str:
-        if len(text) <= limit:
-            return text
-        # Обрезаем по последнему пробелу до лимита
-        trimmed = text[:limit - 3]
-        last_space = trimmed.rfind(" ")
-        if last_space > limit * 0.8:
-            trimmed = trimmed[:last_space]
-        return trimmed + "..."
+
+# ─────────────────────────────────────────────────────────────────────
+# 4. Аномалия цены
+# ─────────────────────────────────────────────────────────────────────
+
+async def generate_anomaly_post(anomaly: dict[str, Any]) -> str:
+    """
+    Генерирует пост об аномалии цены (текстовый пост, <= 4096 символов).
+
+    anomaly:
+        canonical_name, store_name, old_price, new_price, deviation_pct,
+        anomaly_type, gemini_explanation, store_url, avg_market_price
+    """
+    deviation = anomaly.get("deviation_pct", 0)
+    direction = "выросла" if deviation > 0 else "упала"
+    abs_pct = abs(deviation)
+    emoji = "📈" if deviation > 0 else "📉"
+
+    # Получаем объяснение через Gemini если его ещё нет
+    explanation = anomaly.get("gemini_explanation") or ""
+    if not explanation:
+        client = get_gemini_client()
+        try:
+            explanation = await client.explain_anomaly(
+                product_name=anomaly["canonical_name"],
+                store_name=anomaly["store_name"],
+                old_price=float(anomaly["old_price"]),
+                new_price=float(anomaly["new_price"]),
+                avg_market_price=float(
+                    anomaly.get("avg_market_price", anomaly["old_price"])
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"Gemini anomaly explanation fallback: {e}")
+            explanation = ""
+
+    # Ссылка на магазин
+    store_url = anomaly.get("store_url", "")
+    store_link = (
+        f'<a href="{store_url}">{anomaly["store_name"]}</a>'
+        if store_url else anomaly["store_name"]
+    )
+
+    text = (
+        f'{emoji} <b>Цена {direction} на {abs_pct:.0f}%</b>\n\n'
+        f'<b>{anomaly["canonical_name"]}</b>\n'
+        f'{store_link}: {int(anomaly["old_price"])}₸ -> '
+        f'<b>{int(anomaly["new_price"])}₸</b>\n'
+    )
+
+    avg = anomaly.get("avg_market_price")
+    if avg:
+        text += f'Средняя по рынку: {int(avg)}₸\n'
+
+    if explanation:
+        text += f'\n{explanation.strip()}'
+
+    text += "\n\n#мониторинг_цен #астана_цены"
+
+    return _truncate(text, MAX_TEXT_MESSAGE)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Вспомогательные функции
+# ─────────────────────────────────────────────────────────────────────
+
+def _format_price_changes(items: list[dict], direction: str) -> str:
+    """Форматирование списка изменений цен для промпта Gemini."""
+    lines = []
+    for it in items[:5]:
+        key = "drop_pct" if direction == "drop" else "rise_pct"
+        pct = it.get(key, 0)
+        sign = "-" if direction == "drop" else "+"
+        store_name = it.get("store_name", "")
+        lines.append(
+            f"- {it['canonical_name']}: {int(it['old_price'])}₸ -> {int(it['new_price'])}₸ "
+            f"({sign}{abs(pct):.0f}%) — {store_name}"
+        )
+    return "\n".join(lines) if lines else "нет данных"
+
+
+def _format_cheapest_stores(stores: list[dict]) -> str:
+    """Форматирование списка самых дешёвых магазинов для промпта."""
+    lines = []
+    for s in stores[:5]:
+        lines.append(
+            f"- {s['store_name']}: самая низкая цена у {s['products_cheapest']} товаров"
+        )
+    return "\n".join(lines) if lines else "нет данных"
+
+
+def _fallback_weekly_digest(stats: dict) -> str:
+    """Текст если Gemini недоступен."""
+    change = stats.get("avg_basket_change_pct", 0)
+    word = "снизилась" if change < 0 else "выросла"
+    drops = stats.get("top_drops", [])
+    drops_text = ""
+    for d in drops[:3]:
+        drops_text += (
+            f"\n- {d['canonical_name']}: "
+            f"{int(d['old_price'])}₸ -> {int(d['new_price'])}₸ "
+            f"(-{abs(d.get('drop_pct', 0)):.0f}%)"
+        )
+    return (
+        f"📊 <b>Еженедельный дайджест цен — Астана</b>\n\n"
+        f"Период: {stats.get('period', 'прошлая неделя')}\n"
+        f"Отслеживаем: {stats.get('total_products_tracked', 0)} товаров\n"
+        f"Средняя корзина {word} на {abs(change):.1f}%\n"
+        f"\n<b>Лучшие снижения:</b>{drops_text}\n"
+        f"\n#дайджест #астана_цены"
+    )
+
+
+def _fallback_cart_tip(optimization: dict) -> str:
+    """Текст если Gemini недоступен."""
+    assignments = optimization.get("assignments", [])
+    stores_text = ""
+    for a in assignments:
+        items_count = len(a.get("items", []))
+        stores_text += f"\n- {a['store_name']}: {items_count} товаров на {int(a['total'])}₸"
+
+    return (
+        f"🛒 <b>Совет: как сэкономить на продуктах</b>\n\n"
+        f"Категория: {optimization.get('category_name', 'Продукты')}\n"
+        f"Экономия: <b>{int(optimization.get('savings', 0))}₸</b> "
+        f"({optimization.get('savings_pct', 0):.1f}%)\n"
+        f"Итого: {int(optimization.get('grand_total', 0))}₸ "
+        f"вместо {int(optimization.get('baseline_total', 0))}₸\n"
+        f"\n<b>Разбивка:</b>{stores_text}\n"
+        f"\n#умная_корзина #астана_экономия"
+    )

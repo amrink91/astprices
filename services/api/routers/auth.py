@@ -1,6 +1,6 @@
 """
 Авторизация через Telegram Login Widget.
-Проверка HMAC-SHA256, выдача JWT.
+Проверка HMAC-SHA256 (TELEGRAM_BOT_TOKEN), выдача JWT (API_SECRET_KEY).
 """
 from __future__ import annotations
 
@@ -18,16 +18,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.config import settings
 from shared.models import User
-from services.api.deps import get_db
+from services.api.deps import get_db, get_current_user
 
 router = APIRouter()
 logger = logging.getLogger("api.auth")
 
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_SECONDS = 30 * 24 * 3600   # 30 дней
+JWT_ALGORITHM = settings.jwt_algorithm
+JWT_EXPIRE_SECONDS = settings.jwt_expire_hours * 3600
 
 
-# ── Схемы ──────────────────────────────────────────────────────
+# ── Request / Response schemas ────────────────────────────────
 
 class TelegramAuthData(BaseModel):
     id: int
@@ -43,22 +43,39 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user_id: str
-    username: Optional[str]
+    username: Optional[str] = None
 
 
-# ── Helpers ────────────────────────────────────────────────────
+class UserMeResponse(BaseModel):
+    id: str
+    telegram_id: int
+    telegram_username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    photo_url: Optional[str] = None
+    is_subscribed: bool
+
+
+# ── Helpers ───────────────────────────────────────────────────
 
 def _verify_telegram_hash(data: TelegramAuthData) -> bool:
     """
     Telegram Login Widget HMAC-SHA256 verification.
     https://core.telegram.org/widgets/login#checking-authorization
+
+    1. Build data_check_string from sorted fields (excluding 'hash').
+    2. secret_key = SHA256(TELEGRAM_BOT_TOKEN).
+    3. Compare HMAC-SHA256(secret_key, data_check_string) with data.hash.
     """
-    # Проверяем свежесть: не старше 24 часов
+    if not settings.telegram_bot_token:
+        logger.error("TELEGRAM_BOT_TOKEN not configured")
+        return False
+
+    # Reject if auth_date is older than 24 hours
     if time.time() - data.auth_date > 86400:
         return False
 
-    # data_check_string = ключи в алфавитном порядке, кроме hash
-    fields = {
+    fields: dict[str, str] = {
         "auth_date": str(data.auth_date),
         "first_name": data.first_name,
         "id": str(data.id),
@@ -78,36 +95,43 @@ def _verify_telegram_hash(data: TelegramAuthData) -> bool:
 
 
 def _issue_jwt(telegram_id: int) -> str:
+    """Sign JWT with API_SECRET_KEY."""
+    now = int(time.time())
     payload = {
         "sub": str(telegram_id),
-        "exp": int(time.time()) + JWT_EXPIRE_SECONDS,
-        "iat": int(time.time()),
+        "iat": now,
+        "exp": now + JWT_EXPIRE_SECONDS,
     }
     return jwt.encode(payload, settings.api_secret_key, algorithm=JWT_ALGORITHM)
 
 
 def _verify_jwt(token: str) -> Optional[dict]:
+    """Verify and decode JWT. Returns payload dict or None."""
     try:
         return jwt.decode(token, settings.api_secret_key, algorithms=[JWT_ALGORITHM])
     except jwt.PyJWTError:
         return None
 
 
-# ── Endpoints ──────────────────────────────────────────────────
+# ── Endpoints ─────────────────────────────────────────────────
 
 @router.post("/telegram", response_model=TokenResponse)
 async def telegram_login(
     data: TelegramAuthData,
     session: AsyncSession = Depends(get_db),
 ):
-    """Вход через Telegram Login Widget."""
+    """
+    Вход через Telegram Login Widget.
+    Проверяет HMAC-SHA256 подпись, создаёт/обновляет пользователя,
+    возвращает JWT токен.
+    """
     if not _verify_telegram_hash(data):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверная подпись Telegram",
+            detail="Invalid Telegram signature",
         )
 
-    # Upsert пользователя
+    # Upsert user
     user = (await session.execute(
         select(User).where(User.telegram_id == data.id)
     )).scalar_one_or_none()
@@ -129,8 +153,12 @@ async def telegram_login(
         if data.photo_url:
             user.photo_url = data.photo_url
 
+    from sqlalchemy import func
+    user.last_login_at = func.now()
     await session.commit()
-    logger.info(f"Вход: telegram_id={data.id} username={data.username}")
+    await session.refresh(user)
+
+    logger.info("Login: telegram_id=%s username=%s", data.id, data.username)
 
     token = _issue_jwt(data.id)
     return TokenResponse(
@@ -140,12 +168,15 @@ async def telegram_login(
     )
 
 
-@router.get("/me")
-async def me(
-    session: AsyncSession = Depends(get_db),
-    credentials=None,
-):
-    """Информация о текущем пользователе."""
-    from fastapi import Request
-    from fastapi.security import HTTPBearer
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
+@router.get("/me", response_model=UserMeResponse)
+async def me(user=Depends(get_current_user)):
+    """Информация о текущем авторизованном пользователе."""
+    return UserMeResponse(
+        id=str(user.id),
+        telegram_id=user.telegram_id,
+        telegram_username=user.telegram_username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        photo_url=user.photo_url,
+        is_subscribed=user.is_subscribed,
+    )
