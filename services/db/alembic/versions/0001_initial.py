@@ -232,46 +232,69 @@ def upgrade() -> None:
     """)
 
     # ── Seed: stores ─────────────────────────────────────────
-    op.execute("""
-        INSERT INTO stores (id, slug, display_name, website_url,
-            delivery_cost_tenge, delivery_free_threshold, min_order_tenge,
-            avg_delivery_minutes, is_active, scrape_health_score,
-            scraper_config, created_at, updated_at)
-        VALUES
-            (uuid_generate_v4(), 'magnum',  'Magnum',   'https://magnum.kz',
-             790,  5000, 1500, 45, true, 1.0, '{"type":"api","city_id":2}',        NOW(), NOW()),
-            (uuid_generate_v4(), 'arbuz',   'Arbuz.kz', 'https://arbuz.kz',
-             590,  4000, 2000, 60, true, 1.0, '{"type":"graphql","city_id":2}',    NOW(), NOW()),
-            (uuid_generate_v4(), 'small',   'Small',    'https://small.kz',
-             700,  5500, 1000, 30, true, 1.0, '{"type":"playwright"}',             NOW(), NOW()),
-            (uuid_generate_v4(), 'galmart', 'Galmart',  'https://galmart.kz',
-             650,  4500, 1500, 50, true, 1.0, '{"type":"playwright","bitrix":true}', NOW(), NOW()),
-            (uuid_generate_v4(), 'astore',  'A-Store',  'https://a-store.kz',
-             800,  6000,  500, 40, true, 1.0, '{"type":"api"}',                    NOW(), NOW()),
-            (uuid_generate_v4(), 'anvar',   'Анвар',    'https://www.anvar.kz',
-             690,  5000, 1000, 35, true, 1.0, '{"type":"playwright","catalog":"/catalog/"}', NOW(), NOW())
-        ON CONFLICT (slug) DO NOTHING
-    """)
+    stores_table = sa.table(
+        "stores",
+        sa.column("slug", sa.String),
+        sa.column("display_name", sa.String),
+        sa.column("website_url", sa.String),
+        sa.column("delivery_cost_tenge", sa.Numeric),
+        sa.column("delivery_free_threshold", sa.Numeric),
+        sa.column("min_order_tenge", sa.Numeric),
+        sa.column("avg_delivery_minutes", sa.Integer),
+        sa.column("is_active", sa.Boolean),
+        sa.column("scrape_health_score", sa.Float),
+        sa.column("scraper_config", sa.String),
+    )
+    op.bulk_insert(stores_table, [
+        {"slug": "magnum",  "display_name": "Magnum",   "website_url": "https://magnum.kz",
+         "delivery_cost_tenge": 790,  "delivery_free_threshold": 5000, "min_order_tenge": 1500,
+         "avg_delivery_minutes": 45, "is_active": True, "scrape_health_score": 1.0,
+         "scraper_config": '{"type":"api","city_id":2}'},
+        {"slug": "arbuz",   "display_name": "Arbuz.kz", "website_url": "https://arbuz.kz",
+         "delivery_cost_tenge": 590,  "delivery_free_threshold": 4000, "min_order_tenge": 2000,
+         "avg_delivery_minutes": 60, "is_active": True, "scrape_health_score": 1.0,
+         "scraper_config": '{"type":"graphql","city_id":2}'},
+        {"slug": "small",   "display_name": "Small",    "website_url": "https://small.kz",
+         "delivery_cost_tenge": 700,  "delivery_free_threshold": 5500, "min_order_tenge": 1000,
+         "avg_delivery_minutes": 30, "is_active": True, "scrape_health_score": 1.0,
+         "scraper_config": '{"type":"playwright"}'},
+        {"slug": "galmart", "display_name": "Galmart",  "website_url": "https://galmart.kz",
+         "delivery_cost_tenge": 650,  "delivery_free_threshold": 4500, "min_order_tenge": 1500,
+         "avg_delivery_minutes": 50, "is_active": True, "scrape_health_score": 1.0,
+         "scraper_config": '{"type":"playwright","bitrix":true}'},
+        {"slug": "astore",  "display_name": "A-Store",  "website_url": "https://a-store.kz",
+         "delivery_cost_tenge": 800,  "delivery_free_threshold": 6000, "min_order_tenge": 500,
+         "avg_delivery_minutes": 40, "is_active": True, "scrape_health_score": 1.0,
+         "scraper_config": '{"type":"api"}'},
+        {"slug": "anvar",   "display_name": "Анвар",    "website_url": "https://www.anvar.kz",
+         "delivery_cost_tenge": 690,  "delivery_free_threshold": 5000, "min_order_tenge": 1000,
+         "avg_delivery_minutes": 35, "is_active": True, "scrape_health_score": 1.0,
+         "scraper_config": '{"type":"playwright","catalog":"/catalog/"}'},
+    ])
 
     # ── Seed: categories ─────────────────────────────────────
-    op.execute("""
-        INSERT INTO categories (id, name, slug, icon_emoji, sort_order, created_at, updated_at)
-        VALUES
-            (uuid_generate_v4(), 'Молочные продукты',   'dairy',      '🥛', 1,  NOW(), NOW()),
-            (uuid_generate_v4(), 'Мясо и птица',        'meat',       '🥩', 2,  NOW(), NOW()),
-            (uuid_generate_v4(), 'Рыба и морепродукты', 'fish',       '🐟', 3,  NOW(), NOW()),
-            (uuid_generate_v4(), 'Бакалея',             'grocery',    '🌾', 4,  NOW(), NOW()),
-            (uuid_generate_v4(), 'Овощи и фрукты',      'vegetables', '🥦', 5,  NOW(), NOW()),
-            (uuid_generate_v4(), 'Напитки',             'drinks',     '🥤', 6,  NOW(), NOW()),
-            (uuid_generate_v4(), 'Заморозка',           'frozen',     '🧊', 7,  NOW(), NOW()),
-            (uuid_generate_v4(), 'Снеки и сладкое',     'snacks',     '🍫', 8,  NOW(), NOW()),
-            (uuid_generate_v4(), 'Хлеб и выпечка',      'bakery',     '🍞', 9,  NOW(), NOW()),
-            (uuid_generate_v4(), 'Масла и соусы',       'oils',       '🫙', 10, NOW(), NOW()),
-            (uuid_generate_v4(), 'Бытовая химия',       'household',  '🧹', 11, NOW(), NOW()),
-            (uuid_generate_v4(), 'Детские товары',      'baby',       '👶', 12, NOW(), NOW()),
-            (uuid_generate_v4(), 'Другое',              'other',      '📦', 99, NOW(), NOW())
-        ON CONFLICT (slug) DO NOTHING
-    """)
+    categories_table = sa.table(
+        "categories",
+        sa.column("name", sa.String),
+        sa.column("slug", sa.String),
+        sa.column("icon_emoji", sa.String),
+        sa.column("sort_order", sa.Integer),
+    )
+    op.bulk_insert(categories_table, [
+        {"name": "Молочные продукты",   "slug": "dairy",      "icon_emoji": "🥛", "sort_order": 1},
+        {"name": "Мясо и птица",        "slug": "meat",       "icon_emoji": "🥩", "sort_order": 2},
+        {"name": "Рыба и морепродукты", "slug": "fish",       "icon_emoji": "🐟", "sort_order": 3},
+        {"name": "Бакалея",             "slug": "grocery",    "icon_emoji": "🌾", "sort_order": 4},
+        {"name": "Овощи и фрукты",      "slug": "vegetables", "icon_emoji": "🥦", "sort_order": 5},
+        {"name": "Напитки",             "slug": "drinks",     "icon_emoji": "🥤", "sort_order": 6},
+        {"name": "Заморозка",           "slug": "frozen",     "icon_emoji": "🧊", "sort_order": 7},
+        {"name": "Снеки и сладкое",     "slug": "snacks",     "icon_emoji": "🍫", "sort_order": 8},
+        {"name": "Хлеб и выпечка",      "slug": "bakery",     "icon_emoji": "🍞", "sort_order": 9},
+        {"name": "Масла и соусы",       "slug": "oils",       "icon_emoji": "🫙", "sort_order": 10},
+        {"name": "Бытовая химия",       "slug": "household",  "icon_emoji": "🧹", "sort_order": 11},
+        {"name": "Детские товары",      "slug": "baby",       "icon_emoji": "👶", "sort_order": 12},
+        {"name": "Другое",              "slug": "other",      "icon_emoji": "📦", "sort_order": 99},
+    ])
 
 
 def downgrade() -> None:
