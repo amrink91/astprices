@@ -10,8 +10,7 @@ class Category(Base, UUIDMixin, TimestampMixin):
     """Дерево категорий — Gemini строит автоматически"""
     __tablename__ = "categories"
 
-    name_ru:    Mapped[str]           = mapped_column(String(200), nullable=False, unique=True, index=True)
-    name_kk:    Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    name:       Mapped[str]           = mapped_column(String(128), nullable=False)
     slug:       Mapped[str]           = mapped_column(String(200), nullable=False, unique=True, index=True)
     icon_emoji: Mapped[Optional[str]] = mapped_column(String(10),  nullable=True)
     sort_order: Mapped[int]           = mapped_column(Integer,     default=0)
@@ -24,4 +23,4 @@ class Category(Base, UUIDMixin, TimestampMixin):
     products: Mapped[list["Product"]]      = relationship("Product",  back_populates="category")
 
     def __repr__(self) -> str:
-        return f"<Category {self.name_ru}>"
+        return f"<Category {self.name}>"

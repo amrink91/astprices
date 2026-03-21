@@ -11,7 +11,7 @@ class Store(Base, UUIDMixin, TimestampMixin):
 
     slug:         Mapped[str]     = mapped_column(String(50),  unique=True, nullable=False, index=True)
     display_name: Mapped[str]     = mapped_column(String(100), nullable=False)
-    base_url:     Mapped[str]     = mapped_column(Text,        nullable=False)
+    website_url:  Mapped[Optional[str]] = mapped_column(Text,   nullable=True)
     logo_url:     Mapped[Optional[str]] = mapped_column(Text,  nullable=True)
 
     delivery_cost_tenge:       Mapped[Decimal] = mapped_column(Numeric(10,2), nullable=False)
