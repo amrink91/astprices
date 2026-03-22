@@ -190,13 +190,15 @@ class ProductNormalizer:
         if has_emb:
             return
         try:
+            import json as _json
             text = " ".join(filter(None, [
                 canonical_name, norm.get("category_slug", ""),
                 norm.get("brand", ""), norm.get("subcategory", ""),
             ]))
             emb = await self.gemini.get_embedding(text)
+            emb_str = _json.dumps(emb)
             await self.session.execute(
-                update(Product).where(Product.id == product_id).values(name_embedding=emb)
+                update(Product).where(Product.id == product_id).values(name_embedding=emb_str)
             )
         except Exception as e:
             logger.warning(f"Embedding failed '{canonical_name}': {e}")
