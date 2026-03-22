@@ -58,8 +58,11 @@ async def main():
                     for msg_id, data in entries:
                         logger.info(f"Received scrape command: {data}")
                         scraper = scraper_cls()
-                        async with get_session() as session:
-                            products = await scraper.scrape_all()
+                        try:
+                            products = []
+                            async for p in scraper.scrape_all_products():
+                                products.append(p)
+
                             logger.info(f"Scraped {len(products)} products from {STORE_SLUG}")
 
                             # Push to normalizer stream
@@ -70,6 +73,8 @@ async def main():
                                     default=str, ensure_ascii=False
                                 )
                                 await r.xadd("normalize:queue", {"store": STORE_SLUG, "products": batch_data})
+                        finally:
+                            await scraper.close()
 
                         await r.xack(stream_key, "scrapers", msg_id)
             else:
