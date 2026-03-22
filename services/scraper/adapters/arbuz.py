@@ -47,8 +47,11 @@ class ArbuzScraper(AbstractStoreScraper):
     async def close(self) -> None:
         if self._browser:
             await self._browser.close()
-        if hasattr(self, '_pw'):
-            await self._pw.__aexit__(None, None, None)
+        if hasattr(self, '_pw') and self._pw:
+            try:
+                await self._pw.stop()
+            except Exception:
+                pass
         await super().close()
 
     def _parse_price(self, text: str) -> Optional[Decimal]:

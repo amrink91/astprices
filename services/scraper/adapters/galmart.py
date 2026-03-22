@@ -1,246 +1,188 @@
-"""
-Парсер Galmart.kz — Bitrix-based CMS
-Стратегия: Playwright получает сессию + iblock IDs, httpx делает AJAX запросы.
-"""
+"""Парсер Galmart.kz — Playwright HTML scraping (JS-rendered)"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from decimal import Decimal
 from typing import AsyncIterator, Optional
-
-from playwright.async_api import async_playwright
 
 from shared.config import settings
 from shared.scrapers.base import AbstractStoreScraper, RawProduct
 
 logger = logging.getLogger("scraper.galmart")
 
+# Продуктовые категории Galmart Астана — (path, name)
+FOOD_CATEGORIES = [
+    ("/catalog/items/4/2", "Йогурты"),
+    ("/catalog/items/4/3", "Кисломолочные продукты"),
+    ("/catalog/items/4/8", "Масло сливочное, спреды"),
+    ("/catalog/items/4/6", "Молоко, сливки"),
+    ("/catalog/items/4/9", "Сыры"),
+    ("/catalog/items/4/85", "Творог, творожные десерты"),
+    ("/catalog/items/4/4", "Яйцо"),
+    ("/catalog/items/6/16", "Овощи"),
+    ("/catalog/items/6/5", "Фрукты"),
+    ("/catalog/items/6/7", "Ягоды"),
+    ("/catalog/items/6/15", "Зелень"),
+    ("/catalog/items/2/108", "Булочки"),
+    ("/catalog/items/2/109", "Выпечка"),
+    ("/catalog/items/2/107", "Хлеб"),
+    ("/catalog/items/13/30", "Колбасы"),
+    ("/catalog/items/13/27", "Сосиски, сардельки"),
+    ("/catalog/items/1/26", "Мясо охлажденное"),
+    ("/catalog/items/1/24", "Птица"),
+    ("/catalog/items/3/32", "Рыба"),
+    ("/catalog/items/3/33", "Морепродукты"),
+    ("/catalog/items/14/37", "Полуфабрикаты замороженные"),
+    ("/catalog/items/14/39", "Овощи замороженные"),
+    ("/catalog/items/8/40", "Крупы, макароны"),
+    ("/catalog/items/8/41", "Масла растительные"),
+    ("/catalog/items/8/42", "Мука, соль, сахар"),
+    ("/catalog/items/8/43", "Приправы, соусы, специи"),
+    ("/catalog/items/12/10", "Кофе"),
+    ("/catalog/items/12/1", "Чай"),
+    ("/catalog/items/16/47", "Вода"),
+    ("/catalog/items/16/49", "Напитки, лимонады"),
+    ("/catalog/items/16/48", "Соки, нектары"),
+    ("/catalog/items/24/134", "Печенье, вафли"),
+    ("/catalog/items/24/133", "Шоколад, батончики"),
+    ("/catalog/items/15/11", "Детское питание"),
+]
+
 
 class GalmartScraper(AbstractStoreScraper):
 
-    # Bitrix AJAX endpoint
-    AJAX_URL = f"{settings.galmart_base_url}/bitrix/services/main/ajax.php"
-
     def __init__(self) -> None:
         super().__init__("galmart")
-        self._session_cookies: dict = {}
-        self._bitrix_sessid: str = ""
+        self._browser = None
+        self._page = None
 
-    async def _init_bitrix_session(self) -> list[dict]:
-        """
-        Playwright открывает каталог, извлекает:
-        - PHPSESSID cookie
-        - bitrix_sessid (CSRF токен)
-        - Список разделов (iblock sections) с их ID
-        """
-        categories = []
+    async def _init_browser(self) -> None:
+        if self._browser:
+            return
+        from playwright.async_api import async_playwright
+        self._pw = await async_playwright().__aenter__()
+        self._browser = await self._pw.chromium.launch(headless=True)
+        self._page = await self._browser.new_page()
 
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=settings.playwright_headless)
-            context = await browser.new_context(
-                user_agent=settings.random_user_agent,
-                locale="ru-KZ",
-            )
-            page = await context.new_page()
-
+    async def close(self) -> None:
+        if self._browser:
+            await self._browser.close()
+        if hasattr(self, '_pw') and self._pw:
             try:
-                await page.goto(f"{settings.galmart_base_url}/catalog/", wait_until="networkidle", timeout=30000)
-                await page.wait_for_timeout(2000)
+                await self._pw.stop()
+            except Exception:
+                pass
+        await super().close()
 
-                # Извлекаем CSRF токен Bitrix из JS
-                self._bitrix_sessid = await page.evaluate("""
-                    () => {
-                        if (window.BX && BX.bitrix_sessid) return BX.bitrix_sessid();
-                        const m = document.body.innerHTML.match(/bitrix_sessid['":\s]+['"]([a-f0-9]+)['"]/);
-                        return m ? m[1] : '';
-                    }
-                """)
-
-                # Получаем cookies
-                cookies = await context.cookies()
-                self._session_cookies = {c["name"]: c["value"] for c in cookies}
-
-                # Ссылки на категории
-                links = await page.eval_on_selector_all(
-                    "a[href*='/catalog/']",
-                    """els => els
-                        .map(e => ({href: e.href, text: e.innerText.trim(), dataset: e.dataset}))
-                        .filter(x => x.text && x.href.includes('/catalog/') && x.text.length < 50)
-                    """,
-                )
-
-                seen = set()
-                for link in links:
-                    href = link["href"]
-                    if href not in seen:
-                        seen.add(href)
-                        # Извлекаем section ID из URL или data-атрибутов
-                        section_id = link.get("dataset", {}).get("section") or self._extract_id_from_url(href)
-                        categories.append({
-                            "url": href,
-                            "name": link["text"],
-                            "section_id": section_id,
-                        })
-
-                logger.info(f"Galmart: сессия инициализирована, {len(categories)} категорий")
-
-            except Exception as e:
-                logger.error(f"Galmart Playwright: {e}")
-            finally:
-                await browser.close()
-
-        return categories
-
-    def _extract_id_from_url(self, url: str) -> Optional[str]:
-        """Извлекаем числовой ID из URL типа /catalog/section123/ или /catalog/meat/"""
-        match = re.search(r"/catalog/[^/]*?(\d+)", url)
-        return match.group(1) if match else None
-
-    async def _get_section_products(self, section_url: str, cat_name: str, page_num: int = 1) -> tuple[list[RawProduct], bool]:
-        """
-        Bitrix AJAX запрос за товарами секции.
-        Если AJAX не работает — парсим HTML через httpx.
-        """
+    async def _scrape_category(self, path: str, cat_name: str) -> list[RawProduct]:
+        """Парсим одну категорию через Playwright"""
         products = []
-        has_next = False
+        url = f"https://galmart.kz{path}"
 
-        # Метод 1: Bitrix component call
         try:
-            url_with_page = f"{section_url}?PAGEN_1={page_num}"
-            data = await self._get_json(
-                self.AJAX_URL,
-                params={
-                    "action": "catalog.product.list",
-                    "mode": "ajax",
-                    "page": page_num,
-                },
-                headers={
-                    **self._client.headers,
-                    "X-Bitrix-Csrf-Token": self._bitrix_sessid,
-                    "Cookie": "; ".join(f"{k}={v}" for k, v in self._session_cookies.items()),
-                    "Referer": section_url,
-                },
-            )
-            # Пробуем разные структуры ответа Bitrix
-            items = data.get("data", {}).get("items", data.get("items", []))
-            has_next = data.get("data", {}).get("hasNextPage", data.get("hasNextPage", False))
+            await self._page.goto(url, wait_until="networkidle", timeout=60000)
+            await self._page.wait_for_timeout(5000)
+
+            # Scroll to load lazy content
+            for _ in range(3):
+                await self._page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await self._page.wait_for_timeout(1000)
+
+            # Extract products via JS
+            items = await self._page.evaluate("""() => {
+                const cards = document.querySelectorAll('.product');
+                return Array.from(cards).map(card => {
+                    const nameEl = card.querySelector('.name');
+                    const plusMinus = card.querySelector('.plus_minus');
+                    const imgEl = card.querySelector('.photos img');
+                    const priceEl = card.querySelector('.price');
+
+                    let price = plusMinus ? plusMinus.getAttribute('data-price') : null;
+                    let oldPrice = null;
+
+                    if (priceEl) {
+                        const priceText = priceEl.textContent;
+                        const matches = priceText.match(/(\d[\d\s]*)₸/g);
+                        if (matches && matches.length >= 2 && price) {
+                            // First match is old price, second is current
+                            oldPrice = matches[0].replace(/[^\d]/g, '');
+                        } else if (!price && matches && matches.length >= 1) {
+                            price = matches[matches.length - 1].replace(/[^\d]/g, '');
+                        }
+                    }
+
+                    return {
+                        id: card.getAttribute('data-id') || '',
+                        name: nameEl ? nameEl.textContent.trim() : '',
+                        price: price || '',
+                        oldPrice: oldPrice || '',
+                        img: imgEl ? imgEl.getAttribute('src') : '',
+                    };
+                }).filter(x => x.name && x.price);
+            }""")
+
+            self.logger.info(f"  [{cat_name}] {len(items)} товаров")
 
             for item in items:
-                p = self._parse_bitrix_product(item, cat_name)
-                if p:
-                    products.append(p)
+                try:
+                    price = Decimal(item["price"]) if item["price"] else None
+                    if not price or price <= 0:
+                        continue
 
-        except Exception:
-            # Метод 2: HTML парсинг страницы
-            products, has_next = await self._parse_html_page(section_url, cat_name, page_num)
+                    old_price = None
+                    if item.get("oldPrice"):
+                        old_p = Decimal(item["oldPrice"])
+                        if old_p > price:
+                            old_price = old_p
 
-        return products, has_next
+                    sku = item.get("id") or ""
+                    if not sku:
+                        continue
 
-    def _parse_bitrix_product(self, item: dict, cat_name: str) -> Optional[RawProduct]:
-        try:
-            price = self.parse_price(str(item.get("PRICE") or item.get("price") or item.get("CATALOG_PRICE_1") or 0))
-            if not price or price <= 0:
-                return None
+                    img = item.get("img", "")
+                    if img and not img.startswith("http"):
+                        img = f"https://galmart.kz{img}"
 
-            sku = str(item.get("ID") or item.get("id") or item.get("CODE") or "")
-            name = item.get("NAME") or item.get("name") or ""
-            if not sku or not name:
-                return None
-
-            old_price_raw = item.get("OLD_PRICE") or item.get("CATALOG_COMPARE_PRICE")
-            old_price = self.parse_price(str(old_price_raw)) if old_price_raw else None
-
-            # Изображение
-            detail_picture = item.get("DETAIL_PICTURE") or item.get("PREVIEW_PICTURE") or {}
-            img_url = detail_picture.get("SRC") if isinstance(detail_picture, dict) else str(detail_picture)
-            if img_url and not img_url.startswith("http"):
-                img_url = settings.galmart_base_url + img_url
-
-            return RawProduct(
-                store_slug="galmart",
-                store_sku=sku,
-                name_raw=str(name).strip(),
-                price_tenge=price,
-                old_price_tenge=old_price,
-                in_stock=bool(item.get("CAN_BUY", item.get("CATALOG_AVAILABLE", True))),
-                is_promoted=bool(old_price),
-                store_url=f"{settings.galmart_base_url}{item.get('DETAIL_PAGE_URL', f'/catalog/detail/{sku}/')}",
-                store_image_url=img_url or None,
-                category_path=[cat_name],
-                raw_json=item,
-            )
-        except Exception as e:
-            logger.debug(f"Galmart parse error: {e}")
-            return None
-
-    async def _parse_html_page(self, url: str, cat_name: str, page_num: int) -> tuple[list[RawProduct], bool]:
-        """HTML fallback — парсим страницу напрямую"""
-        try:
-            from parsel import Selector
-            resp = await self._client.get(f"{url}?PAGEN_1={page_num}")
-            sel = Selector(resp.text)
-
-            products = []
-            cards = sel.css(".product-item, .catalog-item, [class*='product']")
-
-            for card in cards:
-                name = card.css("*[class*='name']::text, h3::text, h2::text").get("").strip()
-                price_raw = card.css("*[class*='price']:not([class*='old'])::text").get("")
-                price = self.parse_price(price_raw)
-                if not name or not price:
-                    continue
-
-                sku = card.attrib.get("data-id") or card.attrib.get("data-product-id") or name[:20]
-                img = card.css("img::attr(src), img::attr(data-src)").get("")
-                if img and not img.startswith("http"):
-                    img = settings.galmart_base_url + img
-
-                products.append(RawProduct(
-                    store_slug="galmart",
-                    store_sku=str(sku),
-                    name_raw=name,
-                    price_tenge=price,
-                    in_stock=True,
-                    store_url=f"{settings.galmart_base_url}/catalog/",
-                    store_image_url=img or None,
-                    category_path=[cat_name],
-                ))
-
-            # Есть ли следующая страница
-            has_next = bool(sel.css(f"a[href*='PAGEN_1={page_num + 1}']"))
-            return products, has_next
+                    products.append(RawProduct(
+                        store_slug="galmart",
+                        store_sku=sku,
+                        name_raw=item["name"],
+                        price_tenge=price,
+                        old_price_tenge=old_price,
+                        in_stock=True,
+                        is_promoted=bool(old_price),
+                        promo_label=None,
+                        store_url=f"https://galmart.kz{path}",
+                        store_image_url=img or None,
+                        category_path=[cat_name],
+                        unit=None,
+                        raw_json={},
+                    ))
+                except Exception as e:
+                    self.logger.debug(f"Card parse error: {e}")
 
         except Exception as e:
-            logger.error(f"Galmart HTML fallback error: {e}")
-            return [], False
+            self.logger.error(f"Category {cat_name} error: {e}")
+
+        return products
 
     async def scrape_all_products(self) -> AsyncIterator[RawProduct]:
-        categories = await self._init_bitrix_session()
-        if not categories:
-            logger.error("Galmart: нет категорий!")
-            return
+        await self._init_browser()
 
-        # Обновляем cookies в httpx клиенте
-        self._client.cookies.update(self._session_cookies)
-
+        self.logger.info(f"Galmart: {len(FOOD_CATEGORIES)} категорий")
         total = 0
-        logger.info(f"Galmart: {len(categories)} категорий")
+        seen_skus = set()
 
-        for cat in categories:
-            cat_name = cat["name"]
-            cat_url = cat["url"]
-            page_num = 1
-            logger.info(f"  [{cat_name}]")
-
-            while True:
-                products, has_next = await self._get_section_products(cat_url, cat_name, page_num)
-                for p in products:
+        for path, cat_name in FOOD_CATEGORIES:
+            products = await self._scrape_category(path, cat_name)
+            for p in products:
+                if p.store_sku not in seen_skus:
+                    seen_skus.add(p.store_sku)
                     total += 1
                     yield p
 
-                if not has_next or not products:
-                    break
-                page_num += 1
-                await self._human_delay()
+            await asyncio.sleep(1)
 
-        logger.info(f"Galmart: итого {total} товаров")
+        self.logger.info(f"Galmart: итого {total} товаров")
