@@ -100,8 +100,9 @@ class ProductNormalizer:
                 )
                 await self._upsert_store_product(raw, product_id)
 
-                if confidence >= 0.8:
-                    await self._embed_if_missing(product_id, canonical_name, norm)
+                # Embedding disabled for now — saves RPM for normalization
+                # if confidence >= 0.8:
+                #     await self._embed_if_missing(product_id, canonical_name, norm)
 
                 saved += 1
             except Exception as e:
