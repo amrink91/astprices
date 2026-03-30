@@ -1,255 +1,217 @@
-"""
-Парсер Small.kz — Playwright (JS-рендеринг + защита от ботов)
-"""
+"""Парсер Small.kz через Wolt API — Playwright для auth + JSON API для товаров"""
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from decimal import Decimal
 from typing import AsyncIterator, Optional
 
-from playwright.async_api import async_playwright, Page, BrowserContext
-
-from shared.config import settings
 from shared.scrapers.base import AbstractStoreScraper, RawProduct
 
 logger = logging.getLogger("scraper.small")
 
+# Wolt venue slug для Small Астана
+WOLT_VENUE_SLUG = "small-ast15"
+WOLT_BASE = "https://wolt.com/ru/kaz/nur-sultan/venue"
+ASSORTMENT_API = "https://consumer-api.wolt.com/consumer-api/consumer-assortment/v1/venues/slug"
+
+# Категории Small на Wolt (food only)
+FOOD_CATEGORIES = [
+    ("menucategory-7", "Бакалея"),
+    ("menucategory-15", "Вода и напитки"),
+    ("menucategory-21", "Готовая еда"),
+    ("menucategory-29", "Для детей"),
+    ("menucategory-42", "Заморозка"),
+    ("menucategory-49", "Здоровое питание"),
+    ("menucategory-56", "Колбасы и сосиски"),
+    ("menucategory-63", "Консервы и соления"),
+    ("menucategory-67", "Молочные продукты"),
+    ("menucategory-73", "Кофе и чай"),
+    ("menucategory-78", "Мясо и птица"),
+    ("menucategory-83", "Овощи и фрукты"),
+    ("menucategory-88", "Рыба и морепродукты"),
+    ("menucategory-92", "Сладости и снеки"),
+    ("menucategory-98", "Соусы и приправы"),
+    ("menucategory-103", "Сыры"),
+    ("menucategory-108", "Хлеб и выпечка"),
+    ("menucategory-113", "Яйца и масло"),
+]
+
 
 class SmallScraper(AbstractStoreScraper):
-    """
-    Small.kz использует React SPA с lazy-loading.
-    Playwright: перехватываем AJAX запросы параллельно с рендерингом.
-    """
-
     def __init__(self) -> None:
         super().__init__("small")
-        self._intercepted_responses: list[dict] = []
+        self._browser = None
+        self._page = None
+        self._cookies_set = False
 
-    async def _create_stealth_context(self, playwright):
-        """Браузерный контекст с anti-detection"""
-        browser = await playwright.chromium.launch(
-            headless=settings.playwright_headless,
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-            ],
+    async def _init_browser(self) -> None:
+        if self._browser:
+            return
+        from playwright.async_api import async_playwright
+        self._pw = await async_playwright().__aenter__()
+        self._browser = await self._pw.chromium.launch(headless=True)
+        ctx = await self._browser.new_context(
+            geolocation={"latitude": 51.145319, "longitude": 71.412776},
+            permissions=["geolocation"]
         )
-        context = await browser.new_context(
-            user_agent=settings.random_user_agent,
-            viewport={"width": 1366, "height": 768},
-            locale="ru-KZ",
-            timezone_id="Asia/Almaty",
-            extra_http_headers={
-                "Accept-Language": "ru-KZ,ru;q=0.9,kk;q=0.8",
-            },
-        )
-        # Скрываем webdriver
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        """)
-        return browser, context
+        self._page = await ctx.new_page()
 
-    async def _get_category_urls(self, page: Page) -> list[tuple[str, str]]:
-        """Получаем список категорий с главной страницы"""
-        try:
-            await page.goto(f"{settings.small_base_url}/catalog/", wait_until="networkidle", timeout=30000)
-            await page.wait_for_timeout(2000)
-
-            links = await page.eval_on_selector_all(
-                "a[href*='/catalog/']",
-                """els => els
-                    .map(el => ({href: el.href, text: el.innerText.trim()}))
-                    .filter(x => x.text && x.href.includes('/catalog/') && x.href !== window.location.href)
-                """,
-            )
-            # Убираем дубликаты
-            seen = set()
-            result = []
-            for link in links:
-                href = link["href"]
-                text = link["text"]
-                if href not in seen and text and len(text) < 60:
-                    seen.add(href)
-                    result.append((href, text))
-            return result[:50]  # ограничиваем
-        except Exception as e:
-            logger.error(f"Ошибка получения категорий Small: {e}")
-            return []
-
-    async def _scrape_category_page(self, page: Page, url: str, cat_name: str) -> list[RawProduct]:
-        """Парсим одну страницу категории"""
-        products = []
-        try:
-            # Перехватываем API запросы
-            api_data = []
-            page.on("response", lambda r: api_data.append(r) if "/api/" in r.url and r.status == 200 else None)
-
-            await page.goto(url, wait_until="networkidle", timeout=30000)
-            await page.wait_for_timeout(1500)
-
-            # Сначала пробуем через перехваченные API ответы
-            for resp in api_data:
-                try:
-                    json_data = await resp.json()
-                    parsed = self._parse_api_response(json_data, cat_name, resp.url)
-                    if parsed:
-                        products.extend(parsed)
-                        break
-                except Exception:
-                    continue
-
-            # Если API не сработал — парсим HTML
-            if not products:
-                products = await self._parse_html_products(page, cat_name)
-
-        except Exception as e:
-            logger.error(f"Ошибка парсинга страницы {url}: {e}")
-
-        return products
-
-    def _parse_api_response(self, data: dict, cat_name: str, url: str) -> list[RawProduct]:
-        """Пробуем распознать товары из перехваченного API ответа"""
-        items_candidates = []
-
-        if isinstance(data, list):
-            items_candidates = data
-        elif isinstance(data, dict):
-            for key in ["products", "items", "data", "results", "goods"]:
-                if key in data and isinstance(data[key], list):
-                    items_candidates = data[key]
-                    break
-
-        if not items_candidates:
-            return []
-
-        result = []
-        for item in items_candidates:
-            if not isinstance(item, dict):
-                continue
-            price = self.parse_price(str(
-                item.get("price") or item.get("sell_price") or item.get("cost") or 0
-            ))
-            if not price or price <= 0:
-                continue
-            name = item.get("name") or item.get("title") or item.get("product_name", "")
-            sku = str(item.get("id") or item.get("sku") or item.get("article", ""))
-            if not name or not sku:
-                continue
-
-            old_price_raw = item.get("old_price") or item.get("compare_price")
-            old_price = self.parse_price(str(old_price_raw)) if old_price_raw else None
-
-            result.append(RawProduct(
-                store_slug="small",
-                store_sku=sku,
-                name_raw=str(name).strip(),
-                price_tenge=price,
-                old_price_tenge=old_price,
-                in_stock=bool(item.get("in_stock", item.get("available", True))),
-                is_promoted=bool(old_price or item.get("promo")),
-                promo_label=item.get("promo_label") or item.get("badge"),
-                store_url=f"{settings.small_base_url}/product/{sku}",
-                store_image_url=item.get("image") or item.get("photo") or item.get("img"),
-                category_path=[cat_name],
-                unit=item.get("unit"),
-                raw_json=item,
-            ))
-        return result
-
-    async def _parse_html_products(self, page: Page, cat_name: str) -> list[RawProduct]:
-        """Fallback: CSS селекторы для товарных карточек"""
-        try:
-            # Распространённые CSS-паттерны для продуктовых карточек
-            items_data = await page.eval_on_selector_all(
-                ".product-card, .product-item, [class*='product'], [data-product]",
-                """cards => cards.map(card => {
-                    const nameEl  = card.querySelector('[class*="name"], [class*="title"], h3, h2');
-                    const priceEl = card.querySelector('[class*="price"]:not([class*="old"])');
-                    const oldEl   = card.querySelector('[class*="old-price"], [class*="compare"]');
-                    const imgEl   = card.querySelector('img');
-                    const linkEl  = card.querySelector('a[href]');
-                    return {
-                        name:      nameEl  ? nameEl.innerText.trim()  : '',
-                        price:     priceEl ? priceEl.innerText.trim() : '',
-                        old_price: oldEl   ? oldEl.innerText.trim()   : '',
-                        img:       imgEl   ? (imgEl.src || imgEl.dataset.src || '') : '',
-                        url:       linkEl  ? linkEl.href : '',
-                        sku:       card.dataset.id || card.dataset.productId || card.dataset.sku || ''
-                    };
-                }).filter(x => x.name && x.price)
-                """,
-            )
-
-            result = []
-            for item in items_data:
-                price = self.parse_price(item.get("price", ""))
-                if not price or price <= 0:
-                    continue
-                name = item.get("name", "").strip()
-                sku = item.get("sku") or item.get("url", "").split("/")[-1] or name[:20]
-                old_price = self.parse_price(item.get("old_price", ""))
-                result.append(RawProduct(
-                    store_slug="small",
-                    store_sku=str(sku),
-                    name_raw=name,
-                    price_tenge=price,
-                    old_price_tenge=old_price,
-                    in_stock=True,
-                    is_promoted=bool(old_price),
-                    store_url=item.get("url") or f"{settings.small_base_url}/catalog/",
-                    store_image_url=item.get("img") or None,
-                    category_path=[cat_name],
-                ))
-            return result
-        except Exception as e:
-            logger.error(f"HTML парсинг Small: {e}")
-            return []
-
-    async def _scroll_and_load_more(self, page: Page) -> None:
-        """Прокрутка для загрузки lazy-load товаров"""
-        prev_height = 0
-        for _ in range(10):
-            curr_height = await page.evaluate("document.body.scrollHeight")
-            if curr_height == prev_height:
-                break
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1500)
-            prev_height = curr_height
-
-            # Нажимаем "Загрузить ещё" если есть
+    async def close(self) -> None:
+        if self._browser:
+            await self._browser.close()
+        if hasattr(self, '_pw') and self._pw:
             try:
-                load_more = page.locator("button:has-text('Загрузить'), button:has-text('Ещё'), .load-more")
-                if await load_more.count() > 0:
-                    await load_more.first.click()
-                    await page.wait_for_timeout(2000)
+                await self._pw.stop()
+            except Exception:
+                pass
+        await super().close()
+
+    async def _setup_wolt_session(self) -> None:
+        """Открываем Wolt, принимаем куки и устанавливаем геолокацию"""
+        if self._cookies_set:
+            return
+
+        url = f"{WOLT_BASE}/{WOLT_VENUE_SLUG}"
+        await self._page.goto(url, wait_until="networkidle", timeout=60000)
+        await self._page.wait_for_timeout(2000)
+
+        # Dismiss cookie consent
+        consent = self._page.locator("text=Используйте только необходимые")
+        if await consent.count() > 0:
+            await consent.click()
+            self.logger.info("Dismissed cookie consent")
+            await self._page.wait_for_timeout(1000)
+
+        # Share geolocation
+        share_btn = self._page.locator("text=Поделиться местоположением")
+        if await share_btn.count() > 0:
+            await share_btn.click()
+            self.logger.info("Shared geolocation")
+            await self._page.wait_for_timeout(8000)
+            await self._page.wait_for_load_state("networkidle")
+            await self._page.wait_for_timeout(2000)
+
+        self._cookies_set = True
+
+    async def _scrape_category(self, cat_slug: str, cat_name: str) -> list[RawProduct]:
+        """Скрапим категорию через Wolt, перехватывая API ответы"""
+        products = []
+        captured_items = []
+
+        async def on_response(response):
+            url = response.url
+            ct = response.headers.get("content-type", "")
+            if "json" in ct and "consumer-assortment" in url:
+                try:
+                    body = await response.body()
+                    data = json.loads(body)
+                    items = data.get("items", [])
+                    captured_items.extend(items)
+                except Exception:
+                    pass
+
+        self._page.on("response", on_response)
+
+        try:
+            cat_url = f"{WOLT_BASE}/{WOLT_VENUE_SLUG}/items/{cat_slug}"
+            await self._page.goto(cat_url, wait_until="networkidle", timeout=60000)
+            await self._page.wait_for_timeout(3000)
+
+            # Scroll to load all pages (pagination via scroll)
+            prev_count = 0
+            for _ in range(30):
+                await self._page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await self._page.wait_for_timeout(1500)
+                if len(captured_items) == prev_count:
+                    # No new items loaded, try one more scroll
+                    await self._page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await self._page.wait_for_timeout(2000)
+                    if len(captured_items) == prev_count:
+                        break
+                prev_count = len(captured_items)
+
+            # Parse captured items
+            for item in captured_items:
+                try:
+                    name = item.get("name", "").strip()
+                    if not name:
+                        continue
+
+                    price_raw = item.get("price", 0)
+                    if not price_raw or price_raw <= 0:
+                        continue
+                    # Wolt prices in tiin (1/100 tenge)
+                    price = Decimal(str(price_raw)) / 100
+
+                    item_id = item.get("id", "")
+                    barcode = item.get("barcode_gtin", "")
+                    sku = barcode or item_id
+
+                    old_price = None
+                    orig = item.get("original_price")
+                    if orig and orig > price_raw:
+                        old_price = Decimal(str(orig)) / 100
+
+                    # Image
+                    images = item.get("images", [])
+                    img_url = None
+                    if images and isinstance(images[0], dict):
+                        img_url = images[0].get("url", "")
+                    elif images and isinstance(images[0], str):
+                        img_url = images[0]
+
+                    # Build Wolt product URL
+                    store_url = f"{WOLT_BASE}/{WOLT_VENUE_SLUG}"
+
+                    products.append(RawProduct(
+                        store_slug="small",
+                        store_sku=str(sku),
+                        name_raw=name,
+                        price_tenge=price,
+                        old_price_tenge=old_price,
+                        in_stock=True,
+                        is_promoted=bool(old_price),
+                        promo_label=None,
+                        store_url=store_url,
+                        store_image_url=img_url,
+                        category_path=[cat_name],
+                        unit=item.get("description"),
+                        raw_json={},
+                    ))
+                except Exception as e:
+                    self.logger.debug(f"Item parse error: {e}")
+
+        except Exception as e:
+            self.logger.error(f"Category {cat_name} error: {e}")
+        finally:
+            # Remove the response listener
+            try:
+                self._page.remove_listener("response", on_response)
             except Exception:
                 pass
 
+        self.logger.info(f"  [{cat_name}] {len(products)} товаров")
+        return products
+
     async def scrape_all_products(self) -> AsyncIterator[RawProduct]:
-        async with async_playwright() as pw:
-            browser, context = await self._create_stealth_context(pw)
-            page = await context.new_page()
+        await self._init_browser()
+        await self._setup_wolt_session()
 
-            category_urls = await self._get_category_urls(page)
-            if not category_urls:
-                logger.error("Small: категории не найдены!")
-                await browser.close()
-                return
+        self.logger.info(f"Small (Wolt): {len(FOOD_CATEGORIES)} категорий")
+        total = 0
+        seen_skus = set()
 
-            logger.info(f"Small: {len(category_urls)} категорий")
-            total = 0
+        for cat_slug, cat_name in FOOD_CATEGORIES:
+            products = await self._scrape_category(cat_slug, cat_name)
 
-            for url, cat_name in category_urls:
-                logger.info(f"  [{cat_name}]")
-                await self._scroll_and_load_more(page)
-                products = await self._scrape_category_page(page, url, cat_name)
-                for p in products:
+            for p in products:
+                if p.store_sku not in seen_skus:
+                    seen_skus.add(p.store_sku)
                     total += 1
                     yield p
-                # Пауза между категориями
-                await page.wait_for_timeout(settings.random_delay_ms)
 
-            logger.info(f"Small: итого {total} товаров")
-            await browser.close()
+            await asyncio.sleep(1)
+
+        self.logger.info(f"Small (Wolt): итого {total} товаров")

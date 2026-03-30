@@ -1,4 +1,4 @@
-"""Celery задачи парсинга — 6 магазинов включая Анвар"""
+"""Celery задачи парсинга — 4 магазина (Magnum, Arbuz, Small, Galmart)"""
 from __future__ import annotations
 
 import asyncio
@@ -16,8 +16,6 @@ SCRAPERS = {
     "arbuz":   "services.scraper.adapters.arbuz.ArbuzScraper",
     "small":   "services.scraper.adapters.small.SmallScraper",
     "galmart": "services.scraper.adapters.galmart.GalmartScraper",
-    "astore":  "services.scraper.adapters.astore.AStoreScraper",
-    "anvar":   "services.scraper.adapters.anvar.AnvarScraper",
 }
 
 

@@ -25,23 +25,25 @@ app.config_from_object({
         "tasks.publish_weekly_digest":  {"queue": "publish"},
         "tasks.publish_cart_tip":       {"queue": "publish"},
         "tasks.publish_anomalies":      {"queue": "publish"},
+        "tasks.compare_and_publish":    {"queue": "publish"},
         "tasks.*":                      {"queue": "default"},
     },
 })
 
 # ================================================================
 # РАСПИСАНИЕ (все UTC, Астана = UTC+5)
-# 07:00 AST = 02:00 UTC
+# Парсинг каждые 15 мин, сравнение цен на 12-й минуте каждого цикла
 # ================================================================
 app.conf.beat_schedule = {
 
-    # Парсинг каждые 4ч со сдвигом 15 мин между магазинами
-    "scrape-magnum":  {"task": "tasks.scrape_store", "schedule": crontab(minute=0,  hour="2,6,10,14,18"), "args": ("magnum",)},
-    "scrape-arbuz":   {"task": "tasks.scrape_store", "schedule": crontab(minute=15, hour="2,6,10,14,18"), "args": ("arbuz",)},
-    "scrape-small":   {"task": "tasks.scrape_store", "schedule": crontab(minute=30, hour="2,6,10,14,18"), "args": ("small",)},
-    "scrape-galmart": {"task": "tasks.scrape_store", "schedule": crontab(minute=45, hour="2,6,10,14,18"), "args": ("galmart",)},
-    "scrape-astore":  {"task": "tasks.scrape_store", "schedule": crontab(minute=10, hour="3,7,11,15,19"), "args": ("astore",)},
-    "scrape-anvar":   {"task": "tasks.scrape_store", "schedule": crontab(minute=25, hour="3,7,11,15,19"), "args": ("anvar",)},
+    # Парсинг каждые 15 мин со сдвигом 3 мин между магазинами
+    "scrape-magnum":  {"task": "tasks.scrape_store", "schedule": crontab(minute="*/15"), "args": ("magnum",)},
+    "scrape-arbuz":   {"task": "tasks.scrape_store", "schedule": crontab(minute="3,18,33,48"), "args": ("arbuz",)},
+    "scrape-small":   {"task": "tasks.scrape_store", "schedule": crontab(minute="6,21,36,51"), "args": ("small",)},
+    "scrape-galmart": {"task": "tasks.scrape_store", "schedule": crontab(minute="9,24,39,54"), "args": ("galmart",)},
+
+    # Сравнение цен и публикация в Telegram — каждые 15 мин (на 12-й минуте, после всех скраперов)
+    "compare-publish": {"task": "tasks.compare_and_publish", "schedule": crontab(minute="12,27,42,57")},
 
     # Telegram публикации
     # 12:00 AST = 07:00 UTC

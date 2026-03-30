@@ -14,7 +14,7 @@ class MagnumScraper(AbstractStoreScraper):
     CATALOG_URL = f"{BASE}/api/new-product-catalog"
     PRODUCTS_URL = f"{BASE}/api/new-product"
     CITY = "astana"
-    PAGE_SIZE = 100
+    PAGE_SIZE = 50  # API caps at ~50 per request
 
     def __init__(self) -> None:
         super().__init__("magnum")
@@ -32,28 +32,37 @@ class MagnumScraper(AbstractStoreScraper):
     async def _get_products(self, catalog_id: Optional[int] = None) -> list[dict]:
         """Получаем товары с пагинацией"""
         all_products = []
-        offset = 0
+        page = 0
 
         while True:
             params = {"city": self.CITY, "cunt": self.PAGE_SIZE}
             if catalog_id:
                 params["catalog"] = catalog_id
+            if page > 0:
+                params["start"] = page * self.PAGE_SIZE
 
             try:
                 data = await self._get_json(self.PRODUCTS_URL, params=params)
                 if not isinstance(data, list):
                     data = data.get("data", [])
             except Exception as e:
-                self.logger.error(f"Ошибка товаров catalog={catalog_id}: {e}")
+                self.logger.error(f"Ошибка товаров catalog={catalog_id} page={page}: {e}")
+                break
+
+            if not data:
                 break
 
             all_products.extend(data)
+            self.logger.info(f"    page {page}: +{len(data)} (total {len(all_products)})")
 
             if len(data) < self.PAGE_SIZE:
                 break
-            offset += self.PAGE_SIZE
-            # Strapi API Magnum не поддерживает offset, выходим
-            break
+            page += 1
+
+            # Safety limit
+            if page > 50:
+                self.logger.warning(f"catalog={catalog_id}: достигнут лимит страниц (50)")
+                break
 
         return all_products
 

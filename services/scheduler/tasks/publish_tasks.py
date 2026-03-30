@@ -545,3 +545,32 @@ async def _publish_anomalies() -> dict:
 
     logger.info(f"publish_anomalies: опубликовано {published_count} из {len(anomalies)}")
     return {"published": published_count > 0, "count": published_count}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 5. compare_and_publish — каждые 15 минут (сравнение цен между магазинами)
+# ─────────────────────────────────────────────────────────────────────
+
+@app.task(name="tasks.compare_and_publish", queue="publish")
+def compare_and_publish() -> dict:
+    return asyncio.run(_compare_and_publish())
+
+
+async def _compare_and_publish() -> dict:
+    from services.tg_publisher.compare_and_publish import (
+        get_price_comparisons,
+        build_telegram_post,
+        send_to_telegram,
+    )
+
+    comparisons = await get_price_comparisons()
+    logger.info(f"compare_and_publish: найдено {len(comparisons)} совпадений")
+
+    if not comparisons:
+        return {"published": False, "reason": "no_comparisons"}
+
+    post_text = build_telegram_post(comparisons)
+    success = await send_to_telegram(post_text)
+
+    logger.info(f"compare_and_publish: {'✅' if success else '❌'} ({len(comparisons)} совпадений)")
+    return {"published": success, "comparisons": len(comparisons)}
